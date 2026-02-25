@@ -1,6 +1,19 @@
 <div align="center">
 
-# goose
+# goose-custom
+
+_내부망 전용 CLI AI Agent (forked from [block/goose](https://github.com/block/goose))_
+
+</div>
+
+> **Note**: This is a customized fork of [goose](https://github.com/block/goose) for internal network use.
+> Original work by Block, Inc. under Apache License 2.0.
+
+---
+
+<div align="center">
+
+## Original README
 
 _a local, extensible, open source AI agent that automates engineering tasks_
 
