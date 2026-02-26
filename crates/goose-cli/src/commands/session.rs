@@ -2,6 +2,7 @@ use crate::session::message_to_markdown;
 use anyhow::{Context, Result};
 
 use cliclack::{confirm, multiselect, select};
+#[cfg(not(target_os = "windows"))]
 use etcetera::home_dir;
 use goose::session::{generate_diagnostics, Session, SessionManager};
 use goose::utils::safe_truncate;

@@ -147,6 +147,9 @@ pub struct SlashCommandsResponse {
     pub commands: Vec<SlashCommand>,
 }
 
+// detect_provider 비활성화로 인해 실제 사용되지 않음
+// API 호환성을 위해 구조체 유지
+#[allow(dead_code)]
 #[derive(Deserialize, ToSchema)]
 pub struct DetectProviderRequest {
     pub api_key: String,
