@@ -77,3 +77,9 @@ result
 # Goose self-test artifacts
 gooseselftest/
 .tasks/
+
+# 커스터마이징 문서 (내부용)
+docs/
+
+# 참고자료 (테스트 결과, 메모 등)
+참고자료/

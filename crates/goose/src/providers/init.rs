@@ -16,7 +16,6 @@ use super::{
     google::GoogleProvider,
     lead_worker::LeadWorkerProvider,
     litellm::LiteLLMProvider,
-    local_inference::LocalInferenceProvider,
     ollama::OllamaProvider,
     openai::OpenAiProvider,
     openrouter::OpenRouterProvider,
@@ -27,6 +26,8 @@ use super::{
     venice::VeniceProvider,
     xai::XaiProvider,
 };
+#[cfg(feature = "local-inference")]
+use super::local_inference::LocalInferenceProvider;
 use crate::config::ExtensionConfig;
 use crate::model::ModelConfig;
 use crate::providers::base::ProviderType;
@@ -48,6 +49,7 @@ async fn init_registry() -> RwLock<ProviderRegistry> {
         registry.register::<AnthropicProvider>(true);
         registry.register::<AzureProvider>(false);
         registry.register::<BedrockProvider>(false);
+        #[cfg(feature = "local-inference")]
         registry.register::<LocalInferenceProvider>(false);
         registry.register::<ChatGptCodexProvider>(true);
         registry.register::<ClaudeCodeProvider>(true);

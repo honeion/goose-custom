@@ -10,6 +10,8 @@ description.workspace = true
 [features]
 default = []
 cuda = ["candle-core/cuda", "candle-nn/cuda", "llama-cpp-2/cuda"]
+# Local LLM inference using llama.cpp - disable on Windows to avoid C++ runtime conflicts
+local-inference = ["dep:llama-cpp-2"]
 
 [lints]
 workspace = true
@@ -126,7 +128,7 @@ ignore = { workspace = true }
 which = { workspace = true }
 pctx_code_mode = "^0.2.3"
 unbinder = "0.1.7"
-llama-cpp-2 = { version = "0.1.133", features = ["sampler"] }
+llama-cpp-2 = { version = "0.1.133", features = ["sampler"], optional = true }
 encoding_rs = "0.8.35"
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -136,7 +138,7 @@ winapi = { version = "0.3", features = ["wincred"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { version = "0.9", default-features = false, features = ["metal"] }
 candle-nn = { version = "0.9", default-features = false, features = ["metal"] }
-llama-cpp-2 = { version = "0.1.133", features = ["sampler", "metal"] }
+llama-cpp-2 = { version = "0.1.133", features = ["sampler", "metal"], optional = true }
 
 [dev-dependencies]
 serial_test = { workspace = true }

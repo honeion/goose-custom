@@ -555,9 +555,15 @@ where
                 continue
             }
 
-            let chunk: StreamingChunk = serde_json::from_str(line
-                .ok_or_else(|| anyhow!("unexpected stream format"))?)
-                .map_err(|e| anyhow!("Failed to parse streaming chunk: {}: {:?}", e, &line))?;
+            let line_str = line.ok_or_else(|| anyhow!("unexpected stream format"))?;
+
+            // Skip Azure OpenAI content_filter chunks that don't have delta field
+            if line_str.contains("content_filter") && !line_str.contains("\"delta\"") {
+                continue
+            }
+
+            let chunk: StreamingChunk = serde_json::from_str(line_str)
+                .map_err(|e| anyhow!("Failed to parse streaming chunk: {}: {:?}", e, &line_str))?;
 
             if !chunk.choices.is_empty() {
                 if let Some(details) = &chunk.choices[0].delta.reasoning_details {
@@ -594,6 +600,10 @@ where
                             }
                             let response_str = response_chunk?;
                             if let Some(line) = strip_data_prefix(&response_str) {
+                                // Skip Azure OpenAI content_filter chunks that don't have delta field
+                                if line.contains("content_filter") && !line.contains("\"delta\"") {
+                                    continue;
+                                }
 
                                 let tool_chunk: StreamingChunk = serde_json::from_str(line)
                                     .map_err(|e| anyhow!("Failed to parse streaming chunk: {}: {:?}", e, &line))?;

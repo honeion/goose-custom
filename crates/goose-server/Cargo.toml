@@ -13,9 +13,10 @@ workspace = true
 [features]
 default = []
 cuda = ["goose/cuda"]
+local-inference = ["goose/local-inference"]
 
 [dependencies]
-goose = { path = "../goose" }
+goose = { path = "../goose", default-features = false }
 goose-mcp = { path = "../goose-mcp" }
 rmcp = { workspace = true }
 axum = { workspace = true, features = ["ws", "macros"] }

@@ -19,7 +19,7 @@ path = "src/bin/generate_acp_schema.rs"
 workspace = true
 
 [dependencies]
-goose = { path = "../goose" }
+goose = { path = "../goose", default-features = false }
 goose-mcp = { path = "../goose-mcp" }
 rmcp = { workspace = true }
 sacp = "10.1.0"
