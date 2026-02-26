@@ -52,7 +52,7 @@ debug_*.txt
 # Benchmark paths
 benchmark-*
 benchconf.json
-scripts/fake.sh
+tests/fake.sh
 do_not_version/
 /ui/desktop/src/bin/temporal
 /temporal-service/temporal.db
@@ -80,6 +80,12 @@ gooseselftest/
 
 # 커스터마이징 문서 (내부용)
 docs/
+
+# 가이드 문서 (빌드, 배포 등)
+guide/
+
+# 테스트/스크립트 (벤치마크, 진단 등)
+tests/
 
 # 참고자료 (테스트 결과, 메모 등)
 참고자료/
