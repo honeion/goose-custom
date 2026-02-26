@@ -180,6 +180,7 @@ impl Agent {
         let prompt_manager = self.prompt_manager.lock().await;
         let mut system_prompt = prompt_manager
             .builder()
+            .with_environment()  // 환경 정보 자동 감지
             .with_extensions(extensions_info.into_iter())
             .with_frontend_instructions(self.frontend_instructions.lock().await.clone())
             .with_extension_and_tool_counts(extension_count, tool_count)

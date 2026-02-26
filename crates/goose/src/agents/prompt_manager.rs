@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::agents::extension::ExtensionInfo;
+use crate::environment::EnvironmentInfo;
 use crate::hints::load_hints::{load_hint_files, AGENTS_MD_FILENAME, GOOSE_HINTS_FILENAME};
 use crate::{
     config::{Config, GooseMode},
@@ -42,6 +43,9 @@ struct SystemPromptContext {
     max_extensions: usize,
     max_tools: usize,
     code_execution_mode: bool,
+    /// 런타임 환경 정보 (OS, Shell 등)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<EnvironmentInfo>,
 }
 
 pub struct SystemPromptBuilder<'a, M> {
@@ -53,6 +57,7 @@ pub struct SystemPromptBuilder<'a, M> {
     subagents_enabled: bool,
     hints: Option<String>,
     code_execution_mode: bool,
+    environment_info: Option<EnvironmentInfo>,
 }
 
 impl<'a> SystemPromptBuilder<'a, PromptManager> {
@@ -119,6 +124,18 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
         self
     }
 
+    /// 환경 정보를 자동 감지하여 추가
+    pub fn with_environment(mut self) -> Self {
+        self.environment_info = Some(EnvironmentInfo::detect());
+        self
+    }
+
+    /// 커스텀 환경 정보를 설정
+    pub fn with_environment_info(mut self, env: EnvironmentInfo) -> Self {
+        self.environment_info = Some(env);
+        self
+    }
+
     pub fn build(self) -> String {
         let mut extensions_info = self.extensions_info;
 
@@ -158,6 +175,7 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
             max_extensions: MAX_EXTENSIONS,
             max_tools: MAX_TOOLS,
             code_execution_mode: self.code_execution_mode,
+            env: self.environment_info,
         };
 
         let base_prompt = if let Some(override_prompt) = &self.manager.system_prompt_override {
@@ -243,6 +261,7 @@ impl PromptManager {
             subagents_enabled: false,
             hints: None,
             code_execution_mode: false,
+            environment_info: None,
         }
     }
 
