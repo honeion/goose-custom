@@ -131,13 +131,31 @@ pub fn configure_shell_command(
         .env("EDITOR", "sh -c 'echo \"Interactive editor not available in this environment.\" >&2; exit 1'")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_PAGER", "cat")
+        // UTF-8 인코딩 환경변수 (Python, Node.js 등 서브프로세스용)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
+        .env("NODE_OPTIONS", "--no-warnings")
         .args(&shell_config.args);
 
     for (key, value) in &shell_config.envs {
         command_builder.env(key, value);
     }
 
-    command_builder.arg(command);
+    // Windows PowerShell: UTF-8 출력 인코딩 강제 설정
+    #[cfg(windows)]
+    let final_command = if is_powershell(&shell_config.executable) {
+        format!(
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; {}",
+            command
+        )
+    } else {
+        command.to_string()
+    };
+
+    #[cfg(not(windows))]
+    let final_command = command.to_string();
+
+    command_builder.arg(&final_command);
 
     // On Unix systems, create a new process group so we can kill child processes
     #[cfg(unix)]
@@ -146,6 +164,13 @@ pub fn configure_shell_command(
     }
 
     command_builder
+}
+
+/// PowerShell 실행 파일인지 확인
+#[cfg(windows)]
+fn is_powershell(executable: &str) -> bool {
+    let exe_lower = executable.to_lowercase();
+    exe_lower.contains("pwsh") || exe_lower.contains("powershell")
 }
 
 /// Kill a process and all its child processes using platform-specific approaches.
