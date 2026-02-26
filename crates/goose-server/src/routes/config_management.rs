@@ -12,7 +12,7 @@ use goose::config::paths::Paths;
 use goose::config::ExtensionEntry;
 use goose::config::{Config, ConfigError};
 use goose::model::ModelConfig;
-use goose::providers::auto_detect::detect_provider_from_api_key;
+// auto_detect 제거됨 (내부망 버전)
 use goose::providers::base::{ProviderMetadata, ProviderType};
 use goose::providers::canonical::maybe_get_canonical_model;
 use goose::providers::catalog::{
@@ -542,19 +542,13 @@ pub async fn upsert_permissions(
     )
 )]
 pub async fn detect_provider(
-    Json(detect_request): Json<DetectProviderRequest>,
+    Json(_detect_request): Json<DetectProviderRequest>,
 ) -> Result<Json<DetectProviderResponse>, ErrorResponse> {
-    let api_key = detect_request.api_key.trim();
-
-    match detect_provider_from_api_key(api_key).await {
-        Some((provider_name, models)) => Ok(Json(DetectProviderResponse {
-            provider_name,
-            models,
-        })),
-        None => Err(ErrorResponse::not_found(
-            "Could not detect provider from the provided API key",
-        )),
-    }
+    // auto_detect 제거됨 (내부망 버전)
+    // 외부 Provider 자동 감지 불가
+    Err(ErrorResponse::not_found(
+        "Auto-detect is not supported in internal build. Use manual configuration.",
+    ))
 }
 
 #[utoipa::path(

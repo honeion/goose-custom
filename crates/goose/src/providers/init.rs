@@ -4,7 +4,6 @@ use super::{
     azure::AzureProvider,
     base::{Provider, ProviderMetadata},
     ollama::OllamaProvider,
-    openai_compatible::OpenAiCompatibleProvider,
     provider_registry::ProviderRegistry,
 };
 use crate::config::ExtensionConfig;
@@ -20,11 +19,11 @@ async fn init_registry() -> RwLock<ProviderRegistry> {
         // Azure OpenAI - 주력 Provider
         registry.register::<AzureProvider>(false);
 
-        // OpenAI Compatible - 내부 LLM 서버 연동용 (vLLM, LocalAI 등)
-        registry.register::<OpenAiCompatibleProvider>(false);
-
         // Ollama - 로컬 테스트용
         registry.register::<OllamaProvider>(true);
+
+        // 참고: OpenAiCompatibleProvider는 ProviderDef 미구현
+        // Azure, Ollama가 내부적으로 사용하는 헬퍼 구조체임
     });
 
     // declarative providers 비활성화 (외부 서비스)

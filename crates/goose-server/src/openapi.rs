@@ -413,8 +413,8 @@ derive_utoipa!(Icon as IconSchema);
         super::routes::recipe::save_recipe,
         super::routes::recipe::parse_recipe,
         super::routes::recipe::recipe_to_yaml,
-        super::routes::setup::start_openrouter_setup,
-        super::routes::setup::start_tetrate_setup,
+        super::routes::setup::setup_status,
+        // start_openrouter_setup, start_tetrate_setup 제거됨 (내부망 버전)
         super::routes::tunnel::start_tunnel,
         super::routes::tunnel::stop_tunnel,
         super::routes::tunnel::get_tunnel_status,

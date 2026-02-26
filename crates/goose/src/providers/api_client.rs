@@ -343,14 +343,10 @@ impl ApiClient {
         Ok(url)
     }
 
-    async fn get_oauth_token(&self, config: &OAuthConfig) -> Result<String> {
-        super::oauth::get_oauth_token_async(
-            &config.host,
-            &config.client_id,
-            &config.redirect_url,
-            &config.scopes,
-        )
-        .await
+    async fn get_oauth_token(&self, _config: &OAuthConfig) -> Result<String> {
+        // OAuth 지원 제거됨 (내부망 버전)
+        // 외부 OAuth Provider 사용 불가
+        Err(anyhow::anyhow!("OAuth authentication is not supported in internal build"))
     }
 }
 
