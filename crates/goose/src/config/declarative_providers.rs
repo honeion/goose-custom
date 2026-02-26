@@ -1,19 +1,16 @@
+// Declarative Providers - 내부망용으로 단순화
+// 외부 Provider (Groq, Deepseek 등) 제거됨
+
 use crate::config::paths::Paths;
 use crate::config::Config;
-use crate::providers::anthropic::AnthropicProvider;
-use crate::providers::base::{ModelInfo, ProviderType};
-use crate::providers::ollama::OllamaProvider;
-use crate::providers::openai::OpenAiProvider;
+use crate::providers::base::ModelInfo;
 use anyhow::Result;
-use include_dir::{include_dir, Dir};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use utoipa::ToSchema;
-
-static FIXED_PROVIDERS: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/providers/declarative");
 
 pub fn custom_providers_dir() -> std::path::PathBuf {
     Paths::config_dir().join("custom_providers")
@@ -24,7 +21,6 @@ pub fn custom_providers_dir() -> std::path::PathBuf {
 pub enum ProviderEngine {
     OpenAI,
     Ollama,
-    Anthropic,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -145,9 +141,8 @@ pub fn create_custom_provider(
         name: id.clone(),
         engine: match params.engine.as_str() {
             "openai_compatible" => ProviderEngine::OpenAI,
-            "anthropic_compatible" => ProviderEngine::Anthropic,
             "ollama_compatible" => ProviderEngine::Ollama,
-            _ => return Err(anyhow::anyhow!("Invalid provider type: {}", params.engine)),
+            _ => return Err(anyhow::anyhow!("Invalid provider type: {}. Supported: openai_compatible, ollama_compatible", params.engine)),
         },
         display_name: params.display_name.clone(),
         description: Some(format!("Custom {} provider", params.display_name)),
@@ -203,7 +198,6 @@ pub fn update_custom_provider(params: UpdateCustomProviderParams) -> Result<()> 
             name: params.id.clone(),
             engine: match params.engine.as_str() {
                 "openai_compatible" => ProviderEngine::OpenAI,
-                "anthropic_compatible" => ProviderEngine::Anthropic,
                 "ollama_compatible" => ProviderEngine::Ollama,
                 _ => return Err(anyhow::anyhow!("Invalid provider type: {}", params.engine)),
             },
@@ -257,29 +251,10 @@ pub fn load_provider(id: &str) -> Result<LoadedProvider> {
         });
     }
 
-    for file in FIXED_PROVIDERS.files() {
-        if file.path().extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-
-        let content = file
-            .contents_utf8()
-            .ok_or_else(|| anyhow::anyhow!("Failed to read file as UTF-8: {:?}", file.path()))?;
-
-        let config: DeclarativeProviderConfig = match serde_json::from_str(content) {
-            Ok(config) => config,
-            Err(_) => continue,
-        };
-        if config.name == id {
-            return Ok(LoadedProvider {
-                config,
-                is_editable: false,
-            });
-        }
-    }
-
+    // 내장 declarative providers 비활성화 (외부 서비스)
     Err(anyhow::anyhow!("Provider not found: {}", id))
 }
+
 pub fn load_custom_providers(dir: &Path) -> Result<Vec<DeclarativeProviderConfig>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -298,77 +273,12 @@ pub fn load_custom_providers(dir: &Path) -> Result<Vec<DeclarativeProviderConfig
         .collect()
 }
 
-fn load_fixed_providers() -> Result<Vec<DeclarativeProviderConfig>> {
-    let mut res = Vec::new();
-    for file in FIXED_PROVIDERS.files() {
-        if file.path().extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-
-        let content = file
-            .contents_utf8()
-            .ok_or_else(|| anyhow::anyhow!("Failed to read file as UTF-8: {:?}", file.path()))?;
-
-        match serde_json::from_str(content) {
-            Ok(config) => res.push(config),
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping invalid declarative provider {:?}: {}",
-                    file.path(),
-                    e
-                );
-            }
-        }
-    }
-
-    Ok(res)
-}
-
 pub fn register_declarative_providers(
-    registry: &mut crate::providers::provider_registry::ProviderRegistry,
+    _registry: &mut crate::providers::provider_registry::ProviderRegistry,
 ) -> Result<()> {
-    let dir = custom_providers_dir();
-    let custom_providers = load_custom_providers(&dir)?;
-    let fixed_providers = load_fixed_providers()?;
-    for config in fixed_providers {
-        register_declarative_provider(registry, config, ProviderType::Declarative);
-    }
-
-    for config in custom_providers {
-        register_declarative_provider(registry, config, ProviderType::Custom);
-    }
-
+    // 내부망 빌드: declarative providers 비활성화
+    // 외부 서비스 (Groq, Deepseek, Mistral 등)에 접근 불가
+    // 필요시 Azure OpenAI 또는 Ollama 직접 사용
+    tracing::debug!("Declarative providers disabled in internal build");
     Ok(())
-}
-
-pub fn register_declarative_provider(
-    registry: &mut crate::providers::provider_registry::ProviderRegistry,
-    config: DeclarativeProviderConfig,
-    provider_type: ProviderType,
-) {
-    let config_clone = config.clone();
-
-    match config.engine {
-        ProviderEngine::OpenAI => {
-            registry.register_with_name::<OpenAiProvider, _>(
-                &config,
-                provider_type,
-                move |model| OpenAiProvider::from_custom_config(model, config_clone.clone()),
-            );
-        }
-        ProviderEngine::Ollama => {
-            registry.register_with_name::<OllamaProvider, _>(
-                &config,
-                provider_type,
-                move |model| OllamaProvider::from_custom_config(model, config_clone.clone()),
-            );
-        }
-        ProviderEngine::Anthropic => {
-            registry.register_with_name::<AnthropicProvider, _>(
-                &config,
-                provider_type,
-                move |model| AnthropicProvider::from_custom_config(model, config_clone.clone()),
-            );
-        }
-    }
 }
