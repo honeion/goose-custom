@@ -141,11 +141,11 @@ pub fn configure_shell_command(
         command_builder.env(key, value);
     }
 
-    // Windows PowerShell: UTF-8 출력 인코딩 강제 설정
+    // Windows PowerShell: UTF-8 입출력 인코딩 강제 설정
     #[cfg(windows)]
     let final_command = if is_powershell(&shell_config.executable) {
         format!(
-            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; {}",
+            "[Console]::InputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8; {}",
             command
         )
     } else {
