@@ -127,6 +127,48 @@ pub struct ImageProcessorParams {
     pub path: String,
 }
 
+/// Parameters for the glob tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GlobParams {
+    /// Glob pattern to match files (e.g., "**/*.rs", "src/**/*.py")
+    pub pattern: String,
+
+    /// Directory to search in (defaults to current working directory)
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Maximum number of results to return (default: 100, max: 500)
+    #[serde(default)]
+    pub max_results: Option<usize>,
+}
+
+/// Parameters for the grep tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct GrepParams {
+    /// Regular expression pattern to search for
+    pub pattern: String,
+
+    /// File or directory path to search in (defaults to current working directory)
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Glob pattern to filter files (e.g., "*.rs", "*.py")
+    #[serde(default)]
+    pub glob: Option<String>,
+
+    /// Number of context lines to show before and after each match (default: 0)
+    #[serde(default)]
+    pub context_lines: Option<usize>,
+
+    /// Maximum number of matching files to return (default: 20, max: 100)
+    #[serde(default)]
+    pub max_results: Option<usize>,
+
+    /// Case insensitive search (default: false)
+    #[serde(default)]
+    pub ignore_case: Option<bool>,
+}
+
 /// Template structure for prompt definitions
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PromptTemplate {
@@ -1290,6 +1332,344 @@ impl DeveloperServer {
             .with_audience(vec![Role::Assistant]),
             Content::image(data, &mime_type).with_priority(0.0),
         ]))
+    }
+
+    /// Search for files matching a glob pattern.
+    ///
+    /// Fast file pattern matching that respects .gitignore and .gooseignore.
+    /// Returns matching file paths sorted by modification time (most recent first).
+    ///
+    /// Examples:
+    /// glob(pattern="**/*.rs") -> all Rust files
+    /// glob(pattern="src/**/*.py", path="myproject") -> Python files in myproject/src
+    #[tool(
+        name = "glob",
+        description = "Search for files matching a glob pattern. Respects .gitignore and .gooseignore. Returns paths sorted by modification time (most recent first). Use patterns like '**/*.rs' for all Rust files, 'src/**/*.py' for Python files in src/."
+    )]
+    pub async fn glob(
+        &self,
+        params: Parameters<GlobParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use ignore::WalkBuilder;
+
+        let params = params.0;
+        let max_results = params.max_results.unwrap_or(100).min(500);
+
+        let search_path = if let Some(ref p) = params.path {
+            self.resolve_path(p)?
+        } else {
+            std::env::current_dir().map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to get current directory: {}", e),
+                    None,
+                )
+            })?
+        };
+
+        if !search_path.exists() {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Path '{}' does not exist", search_path.display()),
+                None,
+            ));
+        }
+
+        // Build glob matcher
+        let glob_matcher = ignore::overrides::OverrideBuilder::new(&search_path)
+            .add(&params.pattern)
+            .map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Invalid glob pattern '{}': {}", params.pattern, e),
+                    None,
+                )
+            })?
+            .build()
+            .map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to build glob matcher: {}", e),
+                    None,
+                )
+            })?;
+
+        // Collect matching files with modification times
+        let mut matches: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+
+        let walker = WalkBuilder::new(&search_path)
+            .hidden(false)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .build();
+
+        for entry in walker.flatten() {
+            let path = entry.path();
+
+            // Skip directories
+            if path.is_dir() {
+                continue;
+            }
+
+            // Check if path matches the glob pattern
+            if glob_matcher.matched(path, false).is_whitelist() {
+                // Check gooseignore
+                if self.is_ignored(path) {
+                    continue;
+                }
+
+                let mtime = path
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+
+                matches.push((path.to_path_buf(), mtime));
+
+                if matches.len() >= max_results * 2 {
+                    // Collect extra for sorting
+                    break;
+                }
+            }
+        }
+
+        // Sort by modification time (most recent first)
+        matches.sort_by(|a, b| b.1.cmp(&a.1));
+        matches.truncate(max_results);
+
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let result_lines: Vec<String> = matches
+            .iter()
+            .map(|(p, _)| {
+                p.strip_prefix(&cwd)
+                    .unwrap_or(p)
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+
+        let total_found = matches.len();
+        let content = if result_lines.is_empty() {
+            format!("No files found matching pattern '{}'", params.pattern)
+        } else {
+            format!(
+                "Found {} files matching '{}':\n{}",
+                total_found,
+                params.pattern,
+                result_lines.join("\n")
+            )
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(content)]))
+    }
+
+    /// Search for text patterns in files using regular expressions.
+    ///
+    /// Searches file contents for matches and returns results with context.
+    /// Respects .gitignore and .gooseignore patterns.
+    ///
+    /// Examples:
+    /// grep(pattern="fn main") -> find "fn main" in all files
+    /// grep(pattern="TODO", glob="*.rs") -> find TODOs in Rust files only
+    /// grep(pattern="error", context_lines=2) -> show 2 lines of context
+    #[tool(
+        name = "grep",
+        description = "Search for text patterns in files using regex. Returns matching lines with optional context. Use 'glob' to filter file types (e.g., '*.rs'). Respects .gitignore and .gooseignore."
+    )]
+    pub async fn grep(
+        &self,
+        params: Parameters<GrepParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use ignore::WalkBuilder;
+        use std::io::{BufRead, BufReader};
+
+        let params = params.0;
+        let max_results = params.max_results.unwrap_or(20).min(100);
+        let context_lines = params.context_lines.unwrap_or(0).min(10);
+        let ignore_case = params.ignore_case.unwrap_or(false);
+
+        // Compile regex pattern
+        let pattern_str = if ignore_case {
+            format!("(?i){}", params.pattern)
+        } else {
+            params.pattern.clone()
+        };
+
+        let regex = regex::Regex::new(&pattern_str).map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Invalid regex pattern '{}': {}", params.pattern, e),
+                None,
+            )
+        })?;
+
+        let search_path = if let Some(ref p) = params.path {
+            self.resolve_path(p)?
+        } else {
+            std::env::current_dir().map_err(|e| {
+                ErrorData::new(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to get current directory: {}", e),
+                    None,
+                )
+            })?
+        };
+
+        if !search_path.exists() {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Path '{}' does not exist", search_path.display()),
+                None,
+            ));
+        }
+
+        // Build glob filter if provided
+        let glob_filter = if let Some(ref glob_pattern) = params.glob {
+            Some(
+                ignore::overrides::OverrideBuilder::new(&search_path)
+                    .add(glob_pattern)
+                    .map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Invalid glob pattern '{}': {}", glob_pattern, e),
+                            None,
+                        )
+                    })?
+                    .build()
+                    .map_err(|e| {
+                        ErrorData::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("Failed to build glob filter: {}", e),
+                            None,
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut file_results: Vec<String> = Vec::new();
+        let mut total_matches = 0usize;
+
+        // Build walker
+        let walker = WalkBuilder::new(&search_path)
+            .hidden(false)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .build();
+
+        'outer: for entry in walker.flatten() {
+            let path = entry.path();
+
+            // Skip directories
+            if path.is_dir() {
+                continue;
+            }
+
+            // Check glob filter
+            if let Some(ref filter) = glob_filter {
+                if !filter.matched(path, false).is_whitelist() {
+                    continue;
+                }
+            }
+
+            // Check gooseignore
+            if self.is_ignored(path) {
+                continue;
+            }
+
+            // Skip binary files (simple heuristic)
+            if let Some(ext) = path.extension() {
+                let ext_str = ext.to_string_lossy().to_lowercase();
+                if matches!(
+                    ext_str.as_str(),
+                    "exe" | "dll" | "so" | "dylib" | "bin" | "obj" | "o" | "a" | "lib"
+                        | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "ico" | "webp"
+                        | "mp3" | "mp4" | "wav" | "avi" | "mov" | "mkv"
+                        | "zip" | "tar" | "gz" | "rar" | "7z"
+                        | "pdf" | "doc" | "docx" | "xls" | "xlsx"
+                        | "woff" | "woff2" | "ttf" | "otf" | "eot"
+                ) {
+                    continue;
+                }
+            }
+
+            // Read and search file
+            let file = match std::fs::File::open(path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+
+            let reader = BufReader::new(file);
+            let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+
+            let mut file_matches: Vec<(usize, String)> = Vec::new();
+
+            for (line_num, line) in lines.iter().enumerate() {
+                if regex.is_match(line) {
+                    file_matches.push((line_num + 1, line.clone()));
+                }
+            }
+
+            if !file_matches.is_empty() {
+                let relative_path = path
+                    .strip_prefix(&cwd)
+                    .unwrap_or(path)
+                    .to_string_lossy();
+
+                let mut file_output = format!("\n{}:\n", relative_path);
+
+                for (line_num, matched_line) in &file_matches {
+                    if context_lines > 0 {
+                        // Add context before
+                        let start = line_num.saturating_sub(context_lines + 1);
+                        for i in start..*line_num - 1 {
+                            if let Some(ctx_line) = lines.get(i) {
+                                file_output.push_str(&format!("  {}: {}\n", i + 1, ctx_line));
+                            }
+                        }
+                    }
+
+                    // Add matched line with marker
+                    file_output.push_str(&format!("> {}: {}\n", line_num, matched_line));
+
+                    if context_lines > 0 {
+                        // Add context after
+                        let end = (*line_num + context_lines).min(lines.len());
+                        for i in *line_num..end {
+                            if let Some(ctx_line) = lines.get(i) {
+                                file_output.push_str(&format!("  {}: {}\n", i + 1, ctx_line));
+                            }
+                        }
+                        file_output.push('\n');
+                    }
+
+                    total_matches += 1;
+                }
+
+                file_results.push(file_output);
+
+                if file_results.len() >= max_results {
+                    break 'outer;
+                }
+            }
+        }
+
+        let content = if file_results.is_empty() {
+            format!("No matches found for pattern '{}'", params.pattern)
+        } else {
+            format!(
+                "Found {} matches in {} files for '{}':\n{}",
+                total_matches,
+                file_results.len(),
+                params.pattern,
+                file_results.join("")
+            )
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
     fn prepare_image_for_llm(
