@@ -35,7 +35,9 @@ use goose::agents::extension::{Envs, ExtensionConfig, PLATFORM_EXTENSIONS};
 use goose::agents::types::RetryConfig;
 use goose::agents::{Agent, SessionConfig, COMPACT_TRIGGERS};
 use goose::config::{Config, GooseMode};
-use input::InputResult;
+use input::{InputResult, SessionsCommandOptions};
+use goose::session::SessionManager;
+use chrono::Local;
 use rmcp::model::PromptMessage;
 use rmcp::model::ServerNotification;
 use rmcp::model::{ErrorCode, ErrorData};
@@ -53,6 +55,16 @@ use std::time::Instant;
 use tokio;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+/// Display path in a shortened format (show last 2-3 components)
+fn display_path_short(path: &PathBuf) -> String {
+    let components: Vec<_> = path.components().collect();
+    if components.len() <= 3 {
+        return path.display().to_string();
+    }
+    let last_three: PathBuf = components[components.len() - 3..].iter().collect();
+    format!("../{}", last_three.display())
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct JsonOutput {
@@ -603,6 +615,22 @@ impl CliSession {
                 history.save(editor);
                 self.handle_compact().await?;
             }
+            InputResult::Sessions(opts) => {
+                history.save(editor);
+                self.handle_sessions(opts).await?;
+            }
+            InputResult::SwitchSession(_) => {
+                // TUI 단계에서 구현 예정 - input.rs에서 처리됨
+                unreachable!("SwitchSession is handled in input.rs");
+            }
+            InputResult::RenameSession(new_name) => {
+                history.save(editor);
+                self.handle_rename_session(&new_name).await?;
+            }
+            InputResult::SessionHistory => {
+                history.save(editor);
+                self.handle_session_history();
+            }
         }
         Ok(())
     }
@@ -834,6 +862,206 @@ impl CliSession {
         }
         Ok(())
     }
+
+    // ================== Session Management ==================
+
+    async fn handle_sessions(&self, opts: SessionsCommandOptions) -> Result<()> {
+        let session_manager = SessionManager::instance();
+        let mut sessions = session_manager.list_sessions().await?;
+
+        // 현재 세션 정보 가져오기
+        let current_session = session_manager
+            .get_session(&self.session_id, false)
+            .await
+            .ok();
+
+        let current_working_dir = current_session
+            .as_ref()
+            .map(|s| s.working_dir.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if let Some(ref project) = opts.project {
+            let filter = if project == "." {
+                current_working_dir.clone()
+            } else {
+                project.clone()
+            };
+            let filter_lower = filter.to_lowercase();
+            sessions.retain(|s| {
+                s.working_dir
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(&filter_lower)
+            });
+        }
+
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        // 현재 세션이 목록에 있는지 확인
+        let current_in_list = sessions.iter().any(|s| s.id == self.session_id);
+
+        // 현재 세션 정보 먼저 표시
+        if let Some(ref curr) = current_session {
+            let name = if curr.name.is_empty() {
+                "(unnamed)".to_string()
+            } else {
+                curr.name.clone()
+            };
+            let local_time = curr.updated_at.with_timezone(&Local);
+            println!(
+                "\n{}  {} \"{}\" - {}",
+                console::style("▶ Current:").green().bold(),
+                console::style(&self.session_id).green(),
+                name,
+                local_time.format("%Y-%m-%d %H:%M:%S")
+            );
+            if !current_in_list {
+                println!("{}", console::style("  (새 세션 - 메시지 없음)").dim());
+            }
+        }
+
+        if sessions.is_empty() {
+            println!("\n{}", console::style("No other sessions found.").yellow());
+            return Ok(());
+        }
+
+        if opts.flat {
+            println!("\n{}", console::style("Sessions (flat list):").bold().cyan());
+            println!("{}", console::style("─".repeat(70)).dim());
+            for session in &sessions {
+                let is_current = session.id == self.session_id;
+                let marker = if is_current { "◀ " } else { "  " };
+                let name = if session.name.is_empty() {
+                    "(unnamed)".to_string()
+                } else {
+                    safe_truncate(&session.name, 30)
+                };
+                let local_time = session.updated_at.with_timezone(&Local);
+                let line = format!(
+                    "{} {} - {} - {}",
+                    session.id,
+                    name,
+                    local_time.format("%Y-%m-%d %H:%M:%S"),
+                    display_path_short(&session.working_dir)
+                );
+                if is_current {
+                    println!("{}{}", marker, console::style(line).green());
+                } else {
+                    println!("{}{}", marker, line);
+                }
+            }
+        } else {
+            let mut by_project: std::collections::HashMap<String, Vec<_>> =
+                std::collections::HashMap::new();
+            for session in sessions {
+                let key = session.working_dir.to_string_lossy().to_string();
+                by_project.entry(key).or_default().push(session);
+            }
+
+            println!("\n{}", console::style("Sessions by Project:").bold().cyan());
+            println!("{}", console::style("─".repeat(70)).dim());
+
+            let mut projects: Vec<_> = by_project.keys().cloned().collect();
+            projects.sort();
+
+            for project in projects {
+                let project_sessions = by_project.get(&project).unwrap();
+                println!(
+                    "\n📁 {} [{}]",
+                    console::style(display_path_short(&PathBuf::from(&project))).bold(),
+                    project_sessions.len()
+                );
+                for (i, session) in project_sessions.iter().enumerate() {
+                    let is_current = session.id == self.session_id;
+                    let prefix = if i == project_sessions.len() - 1 { "└──" } else { "├──" };
+                    let marker = if is_current { " ◀ current" } else { "" };
+                    let name = if session.name.is_empty() {
+                        "(unnamed)".to_string()
+                    } else {
+                        safe_truncate(&session.name, 25)
+                    };
+                    let local_time = session.updated_at.with_timezone(&Local);
+                    let line = format!(
+                        "{} {}  \"{}\"  {}{}",
+                        prefix, session.id, name,
+                        local_time.format("%Y-%m-%d %H:%M:%S"),
+                        marker
+                    );
+                    if is_current {
+                        println!("   {}", console::style(line).green());
+                    } else {
+                        println!("   {}", line);
+                    }
+                }
+            }
+        }
+
+        println!();
+        println!("{}", console::style("Commands: /rename <name>, /history").dim());
+        println!("{}", console::style("세션 전환: goose session -r --session-id <id>").dim());
+
+        Ok(())
+    }
+
+    async fn handle_rename_session(&self, new_name: &str) -> Result<()> {
+        let session_manager = SessionManager::instance();
+
+        let current_session = session_manager
+            .get_session(&self.session_id, false)
+            .await?;
+
+        let old_name = if current_session.name.is_empty() {
+            "(unnamed)".to_string()
+        } else {
+            current_session.name.clone()
+        };
+
+        if let Err(e) = session_manager
+            .update(&self.session_id)
+            .user_provided_name(new_name)
+            .apply()
+            .await
+        {
+            println!("{}", console::style(format!("Failed to rename session: {}", e)).red());
+            return Ok(());
+        }
+
+        println!(
+            "\n  {} {}",
+            console::style("●").green(),
+            console::style(format!("Session renamed: \"{}\" → \"{}\"", old_name, new_name)).green()
+        );
+
+        Ok(())
+    }
+
+    fn handle_session_history(&self) {
+        println!(
+            "\n{}",
+            console::style(format!("Session History: {}", self.session_id)).bold().cyan()
+        );
+        println!("{}", console::style("─".repeat(60)).dim());
+
+        let messages = self.messages.messages();
+        if messages.is_empty() {
+            println!("{}", console::style("(no messages yet)").dim());
+            return;
+        }
+
+        for (i, msg) in messages.iter().enumerate() {
+            let role = match msg.role {
+                rmcp::model::Role::User => console::style("User").cyan(),
+                rmcp::model::Role::Assistant => console::style("Assistant").green(),
+            };
+            let text = msg.as_concat_text();
+            let preview = safe_truncate(&text, 80);
+            println!("{}. [{}] {}", i + 1, role, preview);
+        }
+
+        println!("\n{}", console::style(format!("Total: {} messages", messages.len())).dim());
+    }
+
+    // ================== End Session Management ==================
 
     async fn plan_with_reasoner_model(
         &mut self,

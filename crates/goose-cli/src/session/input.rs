@@ -25,6 +25,20 @@ pub enum InputResult {
     Recipe(Option<String>),
     Compact,
     ToggleFullToolOutput,
+    // Session management commands
+    Sessions(SessionsCommandOptions),
+    SwitchSession(String),
+    RenameSession(String),
+    SessionHistory,
+}
+
+/// Options for /sessions command
+#[derive(Debug, Default)]
+pub struct SessionsCommandOptions {
+    /// Show flat list instead of project grouping
+    pub flat: bool,
+    /// Filter by project path
+    pub project: Option<String>,
 }
 
 #[derive(Debug)]
@@ -308,8 +322,126 @@ fn handle_slash_command(input: &str) -> Option<InputResult> {
             Some(InputResult::Compact)
         }
         "/r" => Some(InputResult::ToggleFullToolOutput),
+        // Session management commands
+        "/sessions" => Some(InputResult::Sessions(SessionsCommandOptions::default())),
+        s if s.starts_with("/sessions ") => {
+            let args = s.strip_prefix("/sessions ").unwrap_or_default().trim();
+            parse_sessions_command(args)
+        }
+        s if s.starts_with("/switch ") || s == "/switch" => {
+            // TODO: TUI 단계에서 구현 예정 - Agent 재생성 필요
+            println!("{}", console::style("⚠ /switch는 현재 지원되지 않습니다.").yellow());
+            println!("{}", console::style("  세션 전환: goose session -r --session-id <id>").dim());
+            Some(InputResult::Retry)
+        }
+        s if s.starts_with("/rename ") => {
+            let name = s.strip_prefix("/rename ").unwrap_or_default().trim();
+            if name.is_empty() {
+                println!("{}", console::style("Usage: /rename <new_name>").yellow());
+                Some(InputResult::Retry)
+            } else {
+                // Remove surrounding quotes if present
+                let name = name.trim_matches('"').trim_matches('\'');
+                Some(InputResult::RenameSession(name.to_string()))
+            }
+        }
+        "/history" => Some(InputResult::SessionHistory),
+        // 알 수 없는 슬래시 명령어 - 오타 체크
+        s if s.starts_with('/') => {
+            let cmd = s.split_whitespace().next().unwrap_or(s);
+            let suggestions = get_command_suggestions(cmd);
+            if !suggestions.is_empty() {
+                println!(
+                    "{} '{}'",
+                    console::style("알 수 없는 명령어:").yellow(),
+                    cmd
+                );
+                println!(
+                    "{}",
+                    console::style(format!("혹시 이 명령어를 의미하셨나요? {}", suggestions.join(", "))).dim()
+                );
+            } else {
+                println!(
+                    "{} '{}'. /help로 사용 가능한 명령어를 확인하세요.",
+                    console::style("알 수 없는 명령어:").yellow(),
+                    cmd
+                );
+            }
+            Some(InputResult::Retry)
+        }
         _ => None,
     }
+}
+
+/// 명령어 오타에 대한 유사 명령어 제안
+fn get_command_suggestions(input: &str) -> Vec<&'static str> {
+    let commands = [
+        "/exit", "/quit", "/help", "/sessions", "/switch", "/rename", "/history",
+        "/prompts", "/prompt", "/extension", "/builtin", "/mode", "/plan", "/endplan",
+        "/recipe", "/compact", "/clear", "/t", "/r",
+    ];
+
+    let input_lower = input.to_lowercase();
+    let mut suggestions = Vec::new();
+
+    for cmd in commands {
+        // 편집 거리가 2 이하이거나, 입력이 명령어의 prefix인 경우
+        if levenshtein_distance(&input_lower, cmd) <= 2
+           || cmd.starts_with(&input_lower)
+           || input_lower.starts_with(&cmd[..cmd.len().min(3)]) {
+            suggestions.push(cmd);
+        }
+    }
+
+    suggestions.truncate(3); // 최대 3개만 제안
+    suggestions
+}
+
+/// 간단한 레벤슈타인 거리 계산
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+
+    if a_len == 0 { return b_len; }
+    if b_len == 0 { return a_len; }
+
+    let mut matrix = vec![vec![0usize; b_len + 1]; a_len + 1];
+
+    for i in 0..=a_len { matrix[i][0] = i; }
+    for j in 0..=b_len { matrix[0][j] = j; }
+
+    for i in 1..=a_len {
+        for j in 1..=b_len {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            matrix[i][j] = (matrix[i - 1][j] + 1)
+                .min(matrix[i][j - 1] + 1)
+                .min(matrix[i - 1][j - 1] + cost);
+        }
+    }
+
+    matrix[a_len][b_len]
+}
+
+fn parse_sessions_command(args: &str) -> Option<InputResult> {
+    let mut opts = SessionsCommandOptions::default();
+
+    if args == "flat" {
+        opts.flat = true;
+    } else if args.starts_with("--project ") || args == "." {
+        // /sessions --project <path> or /sessions .
+        if args == "." {
+            opts.project = Some(".".to_string());
+        } else {
+            opts.project = Some(args.strip_prefix("--project ").unwrap_or(args).to_string());
+        }
+    } else if !args.is_empty() {
+        // Treat as project filter
+        opts.project = Some(args.to_string());
+    }
+
+    Some(InputResult::Sessions(opts))
 }
 
 fn parse_recipe_command(s: &str) -> Option<InputResult> {
@@ -431,6 +563,12 @@ fn print_help() {
 /compact - Compact the current conversation to reduce context length while preserving key information.
 /? or /help - Display this help message
 /clear - Clears the current chat history
+
+Session Management:
+/sessions [flat|.] - List all sessions (flat: simple list, .: current project only)
+/rename <name> - Rename the current session
+/history - Show current session history
+(세션 전환: goose session --resume <id>)
 
 Navigation:
 Ctrl+C - Clear current line if text is entered, otherwise exit the session
