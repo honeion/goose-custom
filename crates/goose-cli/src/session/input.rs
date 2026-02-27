@@ -30,6 +30,8 @@ pub enum InputResult {
     SwitchSession(String),
     RenameSession(String),
     SessionHistory,
+    // Hints command
+    Hints,
 }
 
 /// Options for /sessions command
@@ -346,6 +348,7 @@ fn handle_slash_command(input: &str) -> Option<InputResult> {
             }
         }
         "/history" => Some(InputResult::SessionHistory),
+        "/hints" => Some(InputResult::Hints),
         // 알 수 없는 슬래시 명령어 - 오타 체크
         s if s.starts_with('/') => {
             let cmd = s.split_whitespace().next().unwrap_or(s);
@@ -377,8 +380,8 @@ fn handle_slash_command(input: &str) -> Option<InputResult> {
 fn get_command_suggestions(input: &str) -> Vec<&'static str> {
     let commands = [
         "/exit", "/quit", "/help", "/sessions", "/switch", "/rename", "/history",
-        "/prompts", "/prompt", "/extension", "/builtin", "/mode", "/plan", "/endplan",
-        "/recipe", "/compact", "/clear", "/t", "/r",
+        "/hints", "/prompts", "/prompt", "/extension", "/builtin", "/mode", "/plan",
+        "/endplan", "/recipe", "/compact", "/clear", "/t", "/r",
     ];
 
     let input_lower = input.to_lowercase();
@@ -568,7 +571,8 @@ Session Management:
 /sessions [flat|.] - List all sessions (flat: simple list, .: current project only)
 /rename <name> - Rename the current session
 /history - Show current session history
-(세션 전환: goose session --resume <id>)
+/hints - Show loaded hint files (.goosehints, .goosehints.local)
+(세션 전환: goose session -r --session-id <id>)
 
 Navigation:
 Ctrl+C - Clear current line if text is entered, otherwise exit the session

@@ -8,6 +8,7 @@ use crate::config::paths::Paths;
 use crate::hints::import_files::read_referenced_files;
 
 pub const GOOSE_HINTS_FILENAME: &str = ".goosehints";
+pub const GOOSE_HINTS_LOCAL_FILENAME: &str = ".goosehints.local";
 pub const AGENTS_MD_FILENAME: &str = "AGENTS.md";
 
 fn find_git_root(start_dir: &Path) -> Option<&Path> {

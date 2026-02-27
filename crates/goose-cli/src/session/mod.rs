@@ -631,6 +631,10 @@ impl CliSession {
                 history.save(editor);
                 self.handle_session_history();
             }
+            InputResult::Hints => {
+                history.save(editor);
+                self.handle_hints();
+            }
         }
         Ok(())
     }
@@ -1059,6 +1063,95 @@ impl CliSession {
         }
 
         println!("\n{}", console::style(format!("Total: {} messages", messages.len())).dim());
+    }
+
+    fn handle_hints(&self) {
+        use goose::hints::load_hints::{GOOSE_HINTS_FILENAME, GOOSE_HINTS_LOCAL_FILENAME, AGENTS_MD_FILENAME};
+        use goose::config::paths::Paths;
+
+        println!("\n{}", console::style("Loaded Hint Layers").bold().cyan());
+        println!("{}", console::style("─".repeat(60)).dim());
+
+        let cwd = std::env::current_dir().unwrap_or_default();
+
+        // 1. Global hints
+        let global_path = Paths::in_config_dir(GOOSE_HINTS_FILENAME);
+        if global_path.is_file() {
+            let content = std::fs::read_to_string(&global_path).unwrap_or_default();
+            let lines = content.lines().count();
+            println!(
+                "\n{} {}",
+                console::style("1. Global").green().bold(),
+                console::style(format!("(~{} lines)", lines)).dim()
+            );
+            println!("   📄 {}", global_path.display());
+        } else {
+            println!(
+                "\n{} {}",
+                console::style("1. Global").dim(),
+                console::style("(not found)").dim()
+            );
+            println!("   📄 {}", global_path.display());
+        }
+
+        // 2. Project hints (.goosehints)
+        let project_path = cwd.join(GOOSE_HINTS_FILENAME);
+        if project_path.is_file() {
+            let content = std::fs::read_to_string(&project_path).unwrap_or_default();
+            let lines = content.lines().count();
+            println!(
+                "\n{} {}",
+                console::style("2. Project").green().bold(),
+                console::style(format!("(~{} lines)", lines)).dim()
+            );
+            println!("   📄 {}", project_path.display());
+        } else {
+            println!(
+                "\n{} {}",
+                console::style("2. Project").dim(),
+                console::style("(not found)").dim()
+            );
+            println!("   📄 {} {}", GOOSE_HINTS_FILENAME, console::style("(create to add project hints)").dim());
+        }
+
+        // 3. Personal hints (.goosehints.local)
+        let local_path = cwd.join(GOOSE_HINTS_LOCAL_FILENAME);
+        if local_path.is_file() {
+            let content = std::fs::read_to_string(&local_path).unwrap_or_default();
+            let lines = content.lines().count();
+            println!(
+                "\n{} {}",
+                console::style("3. Personal").green().bold(),
+                console::style(format!("(~{} lines)", lines)).dim()
+            );
+            println!("   📄 {}", local_path.display());
+        } else {
+            println!(
+                "\n{} {}",
+                console::style("3. Personal").dim(),
+                console::style("(not found)").dim()
+            );
+            println!("   📄 {} {}", GOOSE_HINTS_LOCAL_FILENAME, console::style("(gitignore, local only)").dim());
+        }
+
+        // 4. AGENTS.md
+        let agents_path = cwd.join(AGENTS_MD_FILENAME);
+        if agents_path.is_file() {
+            let content = std::fs::read_to_string(&agents_path).unwrap_or_default();
+            let lines = content.lines().count();
+            println!(
+                "\n{} {}",
+                console::style("4. AGENTS.md").green().bold(),
+                console::style(format!("(~{} lines)", lines)).dim()
+            );
+            println!("   📄 {}", agents_path.display());
+        }
+
+        println!("\n{}", console::style("─".repeat(60)).dim());
+        println!(
+            "{}",
+            console::style("Hints are loaded at session start and merged into system prompt.").dim()
+        );
     }
 
     // ================== End Session Management ==================

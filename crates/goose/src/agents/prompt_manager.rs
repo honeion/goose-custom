@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::agents::extension::ExtensionInfo;
 use crate::environment::EnvironmentInfo;
-use crate::hints::load_hints::{load_hint_files, AGENTS_MD_FILENAME, GOOSE_HINTS_FILENAME};
+use crate::hints::load_hints::{load_hint_files, AGENTS_MD_FILENAME, GOOSE_HINTS_FILENAME, GOOSE_HINTS_LOCAL_FILENAME};
 use crate::{
     config::{Config, GooseMode},
     prompt_template,
@@ -99,6 +99,7 @@ impl<'a> SystemPromptBuilder<'a, PromptManager> {
             .unwrap_or_else(|_| {
                 vec![
                     GOOSE_HINTS_FILENAME.to_string(),
+                    GOOSE_HINTS_LOCAL_FILENAME.to_string(),
                     AGENTS_MD_FILENAME.to_string(),
                 ]
             });
