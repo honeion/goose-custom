@@ -99,6 +99,119 @@ impl TodoState {
     }
 }
 
+/// Task status enum
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl Default for TaskStatus {
+    fn default() -> Self {
+        TaskStatus::Pending
+    }
+}
+
+impl std::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskStatus::Pending => write!(f, "pending"),
+            TaskStatus::InProgress => write!(f, "in_progress"),
+            TaskStatus::Completed => write!(f, "completed"),
+        }
+    }
+}
+
+/// Individual task structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    pub subject: String,
+    pub description: String,
+    #[serde(default)]
+    pub status: TaskStatus,
+    pub active_form: Option<String>,
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub blocks: Vec<String>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl Task {
+    pub fn new(id: String, subject: String, description: String) -> Self {
+        Self {
+            id,
+            subject,
+            description,
+            status: TaskStatus::Pending,
+            active_form: None,
+            owner: None,
+            blocks: Vec::new(),
+            blocked_by: Vec::new(),
+            metadata: None,
+        }
+    }
+
+    pub fn with_active_form(mut self, active_form: String) -> Self {
+        self.active_form = Some(active_form);
+        self
+    }
+}
+
+/// Task management state (structured tasks)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskState {
+    pub tasks: Vec<Task>,
+    pub next_id: u32,
+}
+
+impl ExtensionState for TaskState {
+    const EXTENSION_NAME: &'static str = "task";
+    const VERSION: &'static str = "v1";
+}
+
+impl TaskState {
+    pub fn new() -> Self {
+        Self {
+            tasks: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+    pub fn create_task(&mut self, subject: String, description: String, active_form: Option<String>) -> &Task {
+        let id = self.next_id.to_string();
+        self.next_id += 1;
+
+        let mut task = Task::new(id, subject, description);
+        if let Some(af) = active_form {
+            task = task.with_active_form(af);
+        }
+
+        self.tasks.push(task);
+        self.tasks.last().unwrap()
+    }
+
+    pub fn get_task(&self, id: &str) -> Option<&Task> {
+        self.tasks.iter().find(|t| t.id == id)
+    }
+
+    pub fn get_task_mut(&mut self, id: &str) -> Option<&mut Task> {
+        self.tasks.iter_mut().find(|t| t.id == id)
+    }
+
+    pub fn get_in_progress_task(&self) -> Option<&Task> {
+        self.tasks.iter().find(|t| t.status == TaskStatus::InProgress)
+    }
+
+    pub fn list_tasks(&self) -> &[Task] {
+        &self.tasks
+    }
+}
+
 /// Enabled extensions state implementation for storing which extensions are active
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnabledExtensionsState {
