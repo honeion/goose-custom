@@ -4,7 +4,7 @@ mod editor;
 mod elicitation;
 mod export;
 mod input;
-mod output;
+pub mod output;
 pub mod streaming_buffer;
 mod task_execution_display;
 mod thinking;

@@ -24,6 +24,7 @@ use crate::commands::schedule::{
     handle_schedule_sessions,
 };
 use crate::commands::session::{handle_session_list, handle_session_remove};
+use crate::session::output::{set_verbosity, Verbosity};
 use crate::recipes::extract_from_cli::extract_recipe_info_from_cli;
 use crate::recipes::recipe::{explain_recipe, render_recipe_as_yaml};
 use crate::session::{build_session, SessionBuilderConfig};
@@ -105,6 +106,22 @@ pub struct SessionOptions {
         long_help = "Run extensions (stdio and built-in) inside the specified container. The extension must exist in the container. For built-in extensions, goose must be installed inside the container."
     )]
     pub container: Option<String>,
+
+    #[arg(
+        short = 'q',
+        long = "quiet",
+        help = "Quiet mode: hide tool outputs",
+        conflicts_with_all = ["verbose", "debug"]
+    )]
+    pub quiet: bool,
+
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        help = "Verbose mode: show full tool outputs",
+        conflicts_with_all = ["quiet", "debug"]
+    )]
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1103,6 +1120,15 @@ async fn handle_interactive_session(
         configure_telemetry_consent_dialog()?;
     }
 
+    // CLI 옵션에 따라 출력 상세 레벨 설정
+    if session_opts.quiet {
+        set_verbosity(Verbosity::Quiet);
+    } else if session_opts.verbose {
+        set_verbosity(Verbosity::Verbose);
+    } else if session_opts.debug {
+        set_verbosity(Verbosity::Debug);
+    }
+
     let session_start = std::time::Instant::now();
     let session_type = if fork {
         "forked"
@@ -1159,7 +1185,7 @@ async fn handle_interactive_session(
         max_turns: session_opts.max_turns,
         scheduled_job_id: None,
         interactive: true,
-        quiet: false,
+        quiet: session_opts.quiet,
         output_format: "text".to_string(),
         container: session_opts.container.map(Container::new),
     })
@@ -1324,6 +1350,15 @@ async fn handle_run_command(
 ) -> Result<()> {
     if run_behavior.interactive && get_telemetry_choice().is_none() {
         configure_telemetry_consent_dialog()?;
+    }
+
+    // CLI 옵션에 따라 출력 상세 레벨 설정
+    if output_opts.quiet || session_opts.quiet {
+        set_verbosity(Verbosity::Quiet);
+    } else if session_opts.verbose {
+        set_verbosity(Verbosity::Verbose);
+    } else if session_opts.debug {
+        set_verbosity(Verbosity::Debug);
     }
 
     let parsed = parse_run_input(&input_opts, output_opts.quiet)?;

@@ -25,6 +25,41 @@ use super::streaming_buffer::MarkdownBuffer;
 pub const DEFAULT_MIN_PRIORITY: f32 = 0.0;
 pub const DEFAULT_CLI_LIGHT_THEME: &str = "GitHub";
 pub const DEFAULT_CLI_DARK_THEME: &str = "zenburn";
+pub const DEFAULT_OUTPUT_VERBOSITY: &str = "normal";
+pub const DEFAULT_TOOL_OUTPUT_LINES: usize = 15;
+
+/// 출력 상세 레벨
+/// - Quiet: 도구 출력 숨김, 최종 결과만 표시
+/// - Normal: 요약된 도구 출력 (기본값)
+/// - Verbose: 전체 도구 출력
+/// - Debug: 전체 출력 + 디버그 정보
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Verbosity {
+    Quiet,
+    Normal,
+    Verbose,
+    Debug,
+}
+
+impl Verbosity {
+    pub fn from_str(val: &str) -> Self {
+        match val.to_lowercase().as_str() {
+            "quiet" | "q" => Verbosity::Quiet,
+            "verbose" | "v" => Verbosity::Verbose,
+            "debug" | "d" => Verbosity::Debug,
+            _ => Verbosity::Normal,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Verbosity::Quiet => "quiet",
+            Verbosity::Normal => "normal",
+            Verbosity::Verbose => "verbose",
+            Verbosity::Debug => "debug",
+        }
+    }
+}
 
 // Re-export theme for use in main
 #[derive(Clone, Copy)]
@@ -77,6 +112,15 @@ thread_local! {
             )
     );
     static SHOW_FULL_TOOL_OUTPUT: RefCell<bool> = const { RefCell::new(false) };
+    static CURRENT_VERBOSITY: RefCell<Verbosity> = RefCell::new(
+        std::env::var("GOOSE_OUTPUT_VERBOSITY").ok()
+            .map(|val| Verbosity::from_str(&val))
+            .unwrap_or_else(||
+                Config::global().get_param::<String>("GOOSE_OUTPUT_VERBOSITY").ok()
+                    .map(|val| Verbosity::from_str(&val))
+                    .unwrap_or(Verbosity::Normal)
+            )
+    );
 }
 
 pub fn set_theme(theme: Theme) {
@@ -112,6 +156,34 @@ pub fn toggle_full_tool_output() -> bool {
 
 pub fn get_show_full_tool_output() -> bool {
     SHOW_FULL_TOOL_OUTPUT.with(|s| *s.borrow())
+}
+
+pub fn set_verbosity(verbosity: Verbosity) {
+    let config = Config::global();
+    if let Err(e) = config.set_param("GOOSE_OUTPUT_VERBOSITY", verbosity.as_str()) {
+        eprintln!("Failed to save verbosity setting: {}", e);
+    }
+    CURRENT_VERBOSITY.with(|v| *v.borrow_mut() = verbosity);
+}
+
+pub fn get_verbosity() -> Verbosity {
+    CURRENT_VERBOSITY.with(|v| *v.borrow())
+}
+
+/// 도구 출력을 요약하여 반환 (줄 수 제한)
+pub fn summarize_output(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+
+    if total <= max_lines {
+        return text.to_string();
+    }
+
+    let half = max_lines / 2;
+    let mut result = lines[..half].join("\n");
+    result.push_str(&format!("\n... ({} lines hidden) ...\n", total - max_lines));
+    result.push_str(&lines[total - half..].join("\n"));
+    result
 }
 
 // Simple wrapper around spinner to manage its state
@@ -500,6 +572,12 @@ fn render_tool_request(req: &ToolRequest, theme: Theme, debug: bool) {
 
 fn render_tool_response(resp: &ToolResponse, theme: Theme, debug: bool) {
     let config = Config::global();
+    let verbosity = get_verbosity();
+
+    // Quiet 모드: 도구 응답 출력하지 않음
+    if verbosity == Verbosity::Quiet {
+        return;
+    }
 
     match &resp.tool_result {
         Ok(result) => {
@@ -523,14 +601,24 @@ fn render_tool_response(resp: &ToolResponse, theme: Theme, debug: bool) {
                     continue;
                 }
 
-                if debug {
+                if debug || verbosity == Verbosity::Debug {
                     println!("{:#?}", content);
                 } else if let Some(text) = content.as_text() {
-                    print_markdown(&text.text, theme);
+                    // Normal 모드: 줄 수 제한하여 요약
+                    // Verbose 모드: 전체 출력
+                    let output = if verbosity == Verbosity::Normal && !get_show_full_tool_output() {
+                        summarize_output(&text.text, DEFAULT_TOOL_OUTPUT_LINES)
+                    } else {
+                        text.text.clone()
+                    };
+                    print_markdown(&output, theme);
                 }
             }
         }
-        Err(e) => print_markdown(&e.to_string(), theme),
+        Err(e) => {
+            // 에러는 항상 표시 (Quiet 모드 제외는 위에서 처리)
+            print_markdown(&e.to_string(), theme);
+        }
     }
 }
 
