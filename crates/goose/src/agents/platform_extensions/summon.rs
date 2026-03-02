@@ -46,6 +46,7 @@ pub struct Source {
     pub path: PathBuf,
     pub content: String,
     pub supporting_files: Vec<PathBuf>,
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -136,6 +137,8 @@ pub struct CompletedTask {
 struct SkillMetadata {
     name: String,
     description: String,
+    #[serde(default)]
+    allowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +179,7 @@ fn parse_skill_content(content: &str, path: PathBuf) -> Option<Source> {
         path,
         content: body,
         supporting_files: Vec::new(),
+        allowed_tools: metadata.allowed_tools,
     })
 }
 
@@ -198,6 +202,7 @@ fn parse_agent_content(content: &str, path: PathBuf) -> Option<Source> {
         path,
         content: body,
         supporting_files: Vec::new(),
+        allowed_tools: None, // Agents don't have tool restrictions
     })
 }
 
@@ -644,6 +649,7 @@ impl SummonClient {
                 path: PathBuf::from(&sr.path),
                 content: String::new(),
                 supporting_files: Vec::new(),
+                allowed_tools: None, // Subrecipes don't have tool restrictions
             });
         }
     }
@@ -715,6 +721,7 @@ impl SummonClient {
                         path: path.clone(),
                         content: recipe.instructions.clone().unwrap_or_default(),
                         supporting_files: Vec::new(),
+                        allowed_tools: None, // Recipes don't have tool restrictions
                     });
                 }
                 Err(e) => {
@@ -1143,12 +1150,12 @@ impl SummonClient {
         }
 
         let working_dir = session.working_dir.clone();
-        let recipe = self
+        let (recipe, allowed_tools) = self
             .build_delegate_recipe(&params, session_id, &working_dir)
             .await?;
 
         let task_config = self
-            .build_task_config(&params, &recipe, &session)
+            .build_task_config(&params, &recipe, &session, allowed_tools)
             .await
             .map_err(|e| format!("Failed to build task config: {}", e))?;
 
@@ -1207,17 +1214,18 @@ impl SummonClient {
         Ok(())
     }
 
+    /// Returns (Recipe, allowed_tools) tuple
     async fn build_delegate_recipe(
         &self,
         params: &DelegateParams,
         session_id: &str,
         working_dir: &Path,
-    ) -> Result<Recipe, String> {
+    ) -> Result<(Recipe, Option<Vec<String>>), String> {
         if let Some(source_name) = &params.source {
             self.build_source_recipe(source_name, params, session_id, working_dir)
                 .await
         } else {
-            self.build_adhoc_recipe(params)
+            self.build_adhoc_recipe(params).map(|r| (r, None))
         }
     }
 
@@ -1236,17 +1244,24 @@ impl SummonClient {
             .map_err(|e| format!("Failed to build recipe: {}", e))
     }
 
+    /// Returns (Recipe, allowed_tools) tuple
     async fn build_source_recipe(
         &self,
         source_name: &str,
         params: &DelegateParams,
         session_id: &str,
         working_dir: &Path,
-    ) -> Result<Recipe, String> {
+    ) -> Result<(Recipe, Option<Vec<String>>), String> {
         let source = self
             .resolve_source(session_id, source_name, working_dir)
             .await
             .ok_or_else(|| format!("Source '{}' not found", source_name))?;
+
+        let allowed_tools = source.allowed_tools.clone();
+        info!(
+            "🔧 Source '{}' (kind: {:?}) has allowed_tools: {:?}",
+            source_name, source.kind, allowed_tools
+        );
 
         let mut recipe = match source.kind {
             SourceKind::Recipe | SourceKind::Subrecipe => {
@@ -1268,7 +1283,7 @@ impl SummonClient {
             }
         }
 
-        Ok(recipe)
+        Ok((recipe, allowed_tools))
     }
 
     async fn build_recipe_from_source(
@@ -1417,6 +1432,7 @@ impl SummonClient {
         params: &DelegateParams,
         recipe: &Recipe,
         session: &crate::session::Session,
+        allowed_tools: Option<Vec<String>>,
     ) -> Result<TaskConfig, anyhow::Error> {
         let provider = self.resolve_provider(params, recipe, session).await?;
 
@@ -1435,9 +1451,10 @@ impl SummonClient {
 
         let max_turns = self.resolve_max_turns(session);
 
-        let mut task_config =
-            TaskConfig::new(provider, &session.id, &session.working_dir, extensions);
-        task_config.max_turns = Some(max_turns);
+        let task_config =
+            TaskConfig::new(provider, &session.id, &session.working_dir, extensions)
+                .with_max_turns(Some(max_turns))
+                .with_allowed_tools(allowed_tools);
 
         Ok(task_config)
     }
@@ -1588,12 +1605,12 @@ impl SummonClient {
             .map_err(|e| format!("Failed to get session: {}", e))?;
 
         let working_dir = session.working_dir.clone();
-        let recipe = self
+        let (recipe, allowed_tools) = self
             .build_delegate_recipe(&params, session_id, &working_dir)
             .await?;
 
         let task_config = self
-            .build_task_config(&params, &recipe, &session)
+            .build_task_config(&params, &recipe, &session, allowed_tools)
             .await
             .map_err(|e| format!("Failed to build task config: {}", e))?;
 

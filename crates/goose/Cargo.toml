@@ -29,6 +29,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 futures = { workspace = true }
 dirs = { workspace = true }
+fast_html2md = { workspace = true }
 reqwest = { workspace = true, features = ["rustls", "json", "cookies", "gzip", "brotli", "deflate", "zstd", "charset", "http2", "stream", "blocking", "multipart", "system-proxy"], default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -125,6 +126,7 @@ posthog-rs = "0.3.7"
 shellexpand = { workspace = true }
 indexmap = "2.12.0"
 ignore = { workspace = true }
+similar = "2.7"
 which = { workspace = true }
 pctx_code_mode = "^0.2.3"
 unbinder = "0.1.7"

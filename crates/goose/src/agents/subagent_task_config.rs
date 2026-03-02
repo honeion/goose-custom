@@ -19,6 +19,8 @@ pub struct TaskConfig {
     pub parent_working_dir: PathBuf,
     pub extensions: Vec<ExtensionConfig>,
     pub max_turns: Option<usize>,
+    /// Optional list of allowed tool names. If set, only these tools will be available.
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 impl fmt::Debug for TaskConfig {
@@ -29,6 +31,7 @@ impl fmt::Debug for TaskConfig {
             .field("parent_working_dir", &self.parent_working_dir)
             .field("max_turns", &self.max_turns)
             .field("extensions", &self.extensions)
+            .field("allowed_tools", &self.allowed_tools)
             .finish()
     }
 }
@@ -51,6 +54,7 @@ impl TaskConfig {
                     .and_then(|val| val.parse::<usize>().ok())
                     .unwrap_or(DEFAULT_SUBAGENT_MAX_TURNS),
             ),
+            allowed_tools: None,
         }
     }
 
@@ -58,6 +62,11 @@ impl TaskConfig {
         if let Some(turns) = max_turns {
             self.max_turns = Some(turns);
         }
+        self
+    }
+
+    pub fn with_allowed_tools(mut self, allowed_tools: Option<Vec<String>>) -> Self {
+        self.allowed_tools = allowed_tools;
         self
     }
 }

@@ -69,6 +69,13 @@ use super::text_editor::{
     text_editor_insert, text_editor_replace, text_editor_undo, text_editor_view, text_editor_write,
 };
 
+// New separated tools
+use super::file_history::FileHistory;
+use super::read::{read, ReadParams};
+use super::edit::{edit, EditParams};
+use super::write::{write, WriteParams};
+use super::undo::{undo, UndoParams};
+
 /// Parameters for the screen_capture tool
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ScreenCaptureParams {
@@ -167,6 +174,75 @@ pub struct GrepParams {
     /// Case insensitive search (default: false)
     #[serde(default)]
     pub ignore_case: Option<bool>,
+}
+
+// ============================================================================
+// New Separated Tool Parameters
+// ============================================================================
+
+/// Parameters for the read tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct ReadToolParams {
+    /// Absolute path to file or directory
+    pub path: String,
+
+    /// Starting line number (0-indexed). If not specified, starts from beginning.
+    #[serde(default)]
+    pub offset: Option<usize>,
+
+    /// Number of lines to read. If not specified, reads all (up to limit).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Parameters for the edit tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct EditToolParams {
+    /// Absolute path to file
+    pub path: String,
+
+    /// String to find and replace
+    pub old_string: String,
+
+    /// Replacement string
+    pub new_string: String,
+
+    /// Replace all occurrences (default: false, requires exactly one match)
+    #[serde(default)]
+    pub replace_all: Option<bool>,
+
+    /// Optional unified diff to apply instead of string replacement
+    #[serde(default)]
+    pub diff: Option<String>,
+}
+
+/// Parameters for the write tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WriteToolParams {
+    /// Absolute path to file
+    pub path: String,
+
+    /// Content to write
+    pub content: String,
+
+    /// Create parent directories if they don't exist (default: false)
+    #[serde(default)]
+    pub create_directories: Option<bool>,
+
+    /// Create a .bak backup before overwriting (default: false)
+    #[serde(default)]
+    pub backup: Option<bool>,
+}
+
+/// Parameters for the undo tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct UndoToolParams {
+    /// Absolute path to file
+    pub path: String,
+
+    /// Number of steps to undo (default: 1)
+    #[serde(default)]
+    pub steps: Option<usize>,
 }
 
 /// Template structure for prompt definitions
@@ -787,6 +863,11 @@ impl DeveloperServer {
         ]))
     }
 
+    // ========================================================================
+    // DEPRECATED: text_editor is replaced by read/edit/write/undo tools
+    // Kept for reference but not registered as a tool
+    // ========================================================================
+    /*
     /// Perform text editing operations on files.
     ///
     /// The `command` parameter specifies the operation to perform. Allowed options are:
@@ -914,6 +995,154 @@ impl DeveloperServer {
             )),
         }
     }
+    */
+
+    // ========================================================================
+    // New Separated Tools (Phase 1: tool separation)
+    // ========================================================================
+
+    /// Read a file or list directory contents.
+    ///
+    /// For files: Returns content with line numbers. Use offset/limit for large files.
+    /// For directories: Lists contents (files and subdirectories).
+    #[tool(
+        name = "read",
+        description = "Read a file or list directory contents. For files: returns content with line numbers. Use offset/limit for large files (over 2000 lines). For directories: lists contents."
+    )]
+    pub async fn read_tool(
+        &self,
+        params: Parameters<ReadToolParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let path = self.resolve_path(&params.path)?;
+
+        // Check if file is ignored
+        if self.is_ignored(&path) {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!(
+                    "Access to '{}' is restricted by .gooseignore",
+                    path.display()
+                ),
+                None,
+            ));
+        }
+
+        let read_params = ReadParams {
+            path,
+            offset: params.offset,
+            limit: params.limit,
+        };
+
+        let content = read(read_params).await?;
+        Ok(CallToolResult::success(content))
+    }
+
+    /// Edit a file by replacing text or applying a diff.
+    ///
+    /// For string replacement: old_string must match exactly once (or use replace_all=true).
+    /// For diff: provide unified diff format in the diff parameter.
+    #[tool(
+        name = "edit",
+        description = "Edit a file by replacing text. old_string must match exactly once in the file (or set replace_all=true for all occurrences). Alternatively, provide a unified diff in the diff parameter."
+    )]
+    pub async fn edit_tool(
+        &self,
+        params: Parameters<EditToolParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let path = self.resolve_path(&params.path)?;
+
+        // Check if file is ignored
+        if self.is_ignored(&path) {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!(
+                    "Access to '{}' is restricted by .gooseignore",
+                    path.display()
+                ),
+                None,
+            ));
+        }
+
+        let edit_params = EditParams {
+            path,
+            old_string: params.old_string,
+            new_string: params.new_string,
+            replace_all: params.replace_all.unwrap_or(false),
+            diff: params.diff,
+        };
+
+        let content = edit(edit_params, &self.editor_model, &self.file_history).await?;
+        Ok(CallToolResult::success(content))
+    }
+
+    /// Write content to a file.
+    ///
+    /// Creates a new file or overwrites existing content.
+    /// Use create_directories=true to auto-create parent directories.
+    /// Use backup=true to create a .bak file before overwriting.
+    #[tool(
+        name = "write",
+        description = "Write content to a file. Creates new file or overwrites existing. Set create_directories=true to auto-create parent directories. Set backup=true to create .bak backup."
+    )]
+    pub async fn write_tool(
+        &self,
+        params: Parameters<WriteToolParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let path = self.resolve_path(&params.path)?;
+
+        // Check if file is ignored
+        if self.is_ignored(&path) {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!(
+                    "Access to '{}' is restricted by .gooseignore",
+                    path.display()
+                ),
+                None,
+            ));
+        }
+
+        let write_params = WriteParams {
+            path,
+            content: params.content,
+            create_directories: params.create_directories.unwrap_or(false),
+            backup: params.backup.unwrap_or(false),
+        };
+
+        let content = write(write_params, &self.file_history).await?;
+        Ok(CallToolResult::success(content))
+    }
+
+    /// Undo file changes by restoring from history.
+    ///
+    /// Reverts changes made by edit or write operations.
+    /// Use steps parameter to undo multiple changes at once.
+    #[tool(
+        name = "undo",
+        description = "Undo file changes by restoring from history. Reverts changes made by edit or write operations. Set steps to undo multiple changes at once (default: 1)."
+    )]
+    pub async fn undo_tool(
+        &self,
+        params: Parameters<UndoToolParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let path = self.resolve_path(&params.path)?;
+
+        let undo_params = UndoParams {
+            path,
+            steps: params.steps.unwrap_or(1),
+        };
+
+        let content = undo(undo_params, &self.file_history).await?;
+        Ok(CallToolResult::success(content))
+    }
+
+    // ========================================================================
+    // End of New Separated Tools
+    // ========================================================================
 
     /// Execute a command in the shell.
     ///

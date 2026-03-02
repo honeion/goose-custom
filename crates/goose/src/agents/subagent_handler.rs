@@ -155,6 +155,17 @@ fn get_agent_messages(params: SubagentRunParams) -> AgentMessagesFuture {
             }
         }
 
+        // Apply tool filter if specified
+        if let Some(allowed_tools) = &task_config.allowed_tools {
+            info!(
+                "🔧 Subagent {} setting tool filter: {:?}",
+                session_id, allowed_tools
+            );
+            agent.set_tool_filter(Some(allowed_tools.clone())).await;
+        } else {
+            debug!("🔧 Subagent {} has no tool filter (all tools available)", session_id);
+        }
+
         let has_response_schema = recipe.response.is_some();
         agent
             .apply_recipe_components(recipe.response.clone(), true)

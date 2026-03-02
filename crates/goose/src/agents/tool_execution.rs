@@ -62,9 +62,10 @@ impl Agent {
         for request in tool_requests.iter() {
             if let Ok(tool_call) = request.tool_call.clone() {
                 // Find the corresponding inspection result for this tool request
+                // Use find_map to prioritize results that have a message (e.g., PreviewInspector's diff)
                 let security_message = inspection_results.iter()
-                    .find(|result| result.tool_request_id == request.id)
-                    .and_then(|result| {
+                    .filter(|result| result.tool_request_id == request.id)
+                    .find_map(|result| {
                         if let crate::tool_inspection::InspectionAction::RequireApproval(Some(message)) = &result.action {
                             Some(message.clone())
                         } else {

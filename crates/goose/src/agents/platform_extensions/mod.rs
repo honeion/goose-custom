@@ -5,6 +5,7 @@ pub mod ext_manager;
 pub mod summon;
 pub mod todo;
 pub mod tom;
+pub mod web_fetch;
 
 use std::collections::HashMap;
 
@@ -112,6 +113,19 @@ pub static PLATFORM_EXTENSIONS: Lazy<HashMap<&'static str, PlatformExtensionDef>
                 default_enabled: true,
                 unprefixed_tools: false,
                 client_factory: |ctx| Box::new(tom::TomClient::new(ctx).unwrap()),
+            },
+        );
+
+        map.insert(
+            web_fetch::EXTENSION_NAME,
+            PlatformExtensionDef {
+                name: web_fetch::EXTENSION_NAME,
+                display_name: "Web Fetch",
+                description:
+                    "Fetch content from URLs and convert HTML to Markdown for analysis",
+                default_enabled: true,
+                unprefixed_tools: true,
+                client_factory: |ctx| Box::new(web_fetch::WebFetchClient::new(ctx).unwrap()),
             },
         );
 

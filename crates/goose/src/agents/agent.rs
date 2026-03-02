@@ -39,6 +39,7 @@ use crate::mcp_utils::ToolResult;
 use crate::permission::permission_inspector::PermissionInspector;
 use crate::permission::permission_judge::PermissionCheckResult;
 use crate::permission::PermissionConfirmation;
+use crate::preview::PreviewInspector;
 use crate::providers::base::{PermissionRouting, Provider};
 use crate::providers::errors::ProviderError;
 use crate::recipe::{Author, Recipe, Response, Settings};
@@ -150,6 +151,8 @@ pub struct Agent {
     pub(super) retry_manager: RetryManager,
     pub(super) tool_inspection_manager: ToolInspectionManager,
     container: Mutex<Option<Container>>,
+    /// Optional filter for allowed tools. If set, only tools matching these names are available.
+    tool_filter: Mutex<Option<Vec<String>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +251,7 @@ impl Agent {
             retry_manager: RetryManager::new(),
             tool_inspection_manager: Self::create_tool_inspection_manager(permission_manager),
             container: Mutex::new(None),
+            tool_filter: Mutex::new(None),
         }
     }
 
@@ -261,11 +265,26 @@ impl Agent {
         tool_inspection_manager.add_inspector(Box::new(SecurityInspector::new()));
 
         // Add permission inspector (medium-high priority)
+        // Default readonly tools that don't require approval
+        let readonly_tools: std::collections::HashSet<String> = [
+            "developer__read",
+            "developer__glob",
+            "developer__grep",
+            "developer__analyze",
+            "developer__list_windows",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
         tool_inspection_manager.add_inspector(Box::new(PermissionInspector::new(
-            std::collections::HashSet::new(), // readonly tools - will be populated from extension manager
+            readonly_tools,
             std::collections::HashSet::new(), // regular tools - will be populated from extension manager
             permission_manager,
         )));
+
+        // Add preview inspector (shows diff preview for edit/write/undo tools)
+        tool_inspection_manager.add_inspector(Box::new(PreviewInspector::new()));
 
         // Add repetition inspector (lower priority - basic repetition checking)
         tool_inspection_manager.add_inspector(Box::new(RepetitionInspector::new(None)));
@@ -812,7 +831,45 @@ impl Agent {
             }
         }
 
+        // Apply tool filter if set
+        if let Some(filter) = self.tool_filter.lock().await.as_ref() {
+            let before_count = prefixed_tools.len();
+            info!(
+                "🔧 Tool filter applied: {:?}, tools before filter: {}",
+                filter, before_count
+            );
+            prefixed_tools.retain(|tool| {
+                let tool_name = tool.name.to_string();
+                filter.iter().any(|allowed| {
+                    // Match by exact name or by unprefixed name (e.g., "Glob" matches "developer__glob")
+                    tool_name.eq_ignore_ascii_case(allowed)
+                        || tool_name
+                            .split("__")
+                            .last()
+                            .map(|unprefixed| unprefixed.eq_ignore_ascii_case(allowed))
+                            .unwrap_or(false)
+                })
+            });
+            info!(
+                "🔧 Tools after filter: {} (filtered {} tools)",
+                prefixed_tools.len(),
+                before_count - prefixed_tools.len()
+            );
+            info!(
+                "🔧 Available tools: {:?}",
+                prefixed_tools
+                    .iter()
+                    .map(|t| t.name.to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
+
         prefixed_tools
+    }
+
+    /// Set the tool filter for this agent. Only tools matching the filter will be available.
+    pub async fn set_tool_filter(&self, filter: Option<Vec<String>>) {
+        *self.tool_filter.lock().await = filter;
     }
 
     pub async fn remove_extension(&self, name: &str, session_id: &str) -> Result<()> {
