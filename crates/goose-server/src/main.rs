@@ -1,3 +1,4 @@
+// Import modules for different functionalities
 mod commands;
 mod configuration;
 mod error;
@@ -7,8 +8,8 @@ mod routes;
 mod state;
 mod tunnel;
 
+// Import necessary dependencies
 use std::path::PathBuf;
-
 use clap::{Parser, Subcommand};
 use goose::agents::validate_extensions;
 use goose::config::paths::Paths;
@@ -17,6 +18,7 @@ use goose_mcp::{
     AutoVisualiserRouter, ComputerControllerServer, DeveloperServer, MemoryServer, TutorialServer,
 };
 
+// Define CLI options and subcommands
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
@@ -25,6 +27,7 @@ struct Cli {
     command: Commands,
 }
 
+// Define available subcommands
 #[derive(Subcommand)]
 enum Commands {
     /// Run the agent server
@@ -42,15 +45,18 @@ enum Commands {
     },
 }
 
+// Main async function to parse CLI input and execute respective commands
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::Agent => {
+            // Run the agent server
             commands::agent::run().await?;
         }
         Commands::Mcp { server } => {
+            // Setup logging for MCP server
             logging::setup_logging(Some(&format!("mcp-{}", server.name())))?;
             match server {
                 McpCommand::AutoVisualiser => serve(AutoVisualiserRouter::new()).await?,
@@ -58,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
                 McpCommand::Memory => serve(MemoryServer::new()).await?,
                 McpCommand::Tutorial => serve(TutorialServer::new()).await?,
                 McpCommand::Developer => {
+                    // Load .bash_env configuration for Developer server
                     let bash_env = Paths::config_dir().join(".bash_env");
                     serve(
                         DeveloperServer::new()
@@ -69,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Commands::ValidateExtensions { path } => {
+            // Validate the bundled-extensions JSON file
             match validate_extensions::validate_bundled_extensions(&path) {
                 Ok(msg) => println!("{msg}"),
                 Err(e) => {

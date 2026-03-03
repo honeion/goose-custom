@@ -89,3 +89,13 @@ tests/
 
 # 참고자료 (테스트 결과, 메모 등)
 참고자료/
+
+# Test files
+test.txt
+test2.txt
+test_euckr.txt
+testdir/
+sample.txt
+curl_request.py
+response.html
+.goosehints.local
