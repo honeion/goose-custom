@@ -420,17 +420,29 @@ impl SummonClient {
         Tool::new(
             "delegate",
             "Delegate a task to a subagent that runs independently with its own context.\n\n\
-             Modes:\n\
-             1. Ad-hoc: Provide `instructions` for a custom task\n\
-             2. Source-based: Provide `source` name to run a subrecipe, recipe, skill, or agent\n\
-             3. Combined: Pair a source with a task (e.g., source: \"rust-patterns\", instructions: \"review auth.rs\")\n\n\
-             Effective Delegation:\n\
-             - Delegates know only instructions + source content\n\
-             - Delegates cannot coordinate. Same-file work = conflicts.\n\
-             - Parallel: async: true, then load(taskId) to wait and get results. Single: sync.\n\n\
-             Research (read-only): parallelize freely - delegates explore and report back.\n\
-             Work (writes): partition files strictly - no two delegates touch the same file.\n\n\
-             Decompose → async delegates → load(taskId) for each → synthesize."
+             ## Available Sources (Builtin Skills)\n\n\
+             - **explore**: Fast codebase exploration. Use for: \"where is X?\", \"find files matching...\", \
+               \"what does this function do?\", \"show me the structure\"\n\
+             - **research**: Deep analysis with web search. Use for: complex questions needing investigation, \
+               understanding systems end-to-end, gathering info from code AND web\n\
+             - **coder**: Code modifications. Use for: \"add feature\", \"fix bug\", \"refactor\", \"edit file\", \
+               \"write new code\", \"update config\"\n\
+             - **bash**: Command execution. Use for: \"run tests\", \"build project\", \"git operations\", \
+               \"check status\", \"install packages\"\n\
+             - **general**: Complex multi-step tasks. Use when task needs BOTH code changes AND commands, \
+               or spans multiple domains\n\n\
+             ## When NOT to delegate\n\
+             - Simple file read → use read tool directly\n\
+             - Single grep search → use grep tool directly\n\
+             - Quick questions about current context → answer directly\n\n\
+             ## Modes\n\
+             1. Source-based: `delegate(source: \"explore\", instructions: \"find auth handlers\")`\n\
+             2. Ad-hoc: `delegate(instructions: \"custom task\")` (uses general capabilities)\n\n\
+             ## Effective Delegation\n\
+             - Delegates know only instructions + source content (no shared context)\n\
+             - Research (read-only): parallelize freely with async: true\n\
+             - Work (writes): partition files strictly - no two delegates touch same file\n\
+             - Decompose → async delegates → load(taskId) for each → synthesize"
                 .to_string(),
             schema.as_object().unwrap().clone(),
         )
@@ -1134,6 +1146,18 @@ impl SummonClient {
 
         self.validate_delegate_params(&params)?;
 
+        // Log delegate invocation
+        let source_info = params.source.as_deref().unwrap_or("ad-hoc");
+        let instructions_preview = params
+            .instructions
+            .as_ref()
+            .map(|i| truncate(i, 50))
+            .unwrap_or_else(|| "(none)".to_string());
+        info!(
+            "🚀 delegate called: source={}, instructions={}, async={}",
+            source_info, instructions_preview, params.r#async
+        );
+
         let session = self
             .context
             .session_manager
@@ -1179,6 +1203,21 @@ impl SummonClient {
             .await
             .map_err(|e| format!("Failed to create subagent session: {}", e))?;
 
+        let subagent_id = subagent_session.id.clone();
+        info!(
+            "🤖 SubAgent started: id={}, source={}",
+            subagent_id, source_info
+        );
+
+        // Send subagent start notification
+        let start_notification = self.create_subagent_notification(
+            &subagent_id,
+            source_info,
+            "started",
+            &instructions_preview,
+        );
+        self.send_notification(start_notification).await;
+
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel::<ServerNotification>();
         Self::spawn_notification_bridge(
             notif_rx,
@@ -1186,20 +1225,91 @@ impl SummonClient {
             Arc::new(Mutex::new(Vec::new())),
         );
 
+        let started_at = Instant::now();
         let result = run_subagent_task(SubagentRunParams {
             config: agent_config,
             recipe,
             task_config,
             return_last_only: true,
-            session_id: subagent_session.id,
+            session_id: subagent_id.clone(),
             cancellation_token: Some(cancellation_token),
             on_message: None,
             notification_tx: Some(notif_tx),
         })
-        .await
-        .map_err(|e| format!("Delegation failed: {}", e))?;
+        .await;
 
-        Ok(vec![Content::text(result)])
+        let duration = started_at.elapsed();
+
+        match &result {
+            Ok(output) => {
+                info!(
+                    "✅ SubAgent completed: id={}, source={}, duration={}, output_len={}",
+                    subagent_id,
+                    source_info,
+                    round_duration(duration),
+                    output.len()
+                );
+                let end_notification = self.create_subagent_notification(
+                    &subagent_id,
+                    source_info,
+                    "completed",
+                    &format!("duration: {}", round_duration(duration)),
+                );
+                self.send_notification(end_notification).await;
+            }
+            Err(e) => {
+                warn!(
+                    "❌ SubAgent failed: id={}, source={}, duration={}, error={}",
+                    subagent_id,
+                    source_info,
+                    round_duration(duration),
+                    e
+                );
+                let end_notification = self.create_subagent_notification(
+                    &subagent_id,
+                    source_info,
+                    "failed",
+                    &e.to_string(),
+                );
+                self.send_notification(end_notification).await;
+            }
+        }
+
+        let output = result.map_err(|e| format!("Delegation failed: {}", e))?;
+        Ok(vec![Content::text(output)])
+    }
+
+    fn create_subagent_notification(
+        &self,
+        subagent_id: &str,
+        source: &str,
+        status: &str,
+        details: &str,
+    ) -> ServerNotification {
+        use rmcp::model::{LoggingLevel, LoggingMessageNotification, LoggingMessageNotificationParam};
+
+        ServerNotification::LoggingMessageNotification(LoggingMessageNotification {
+            method: Default::default(),
+            params: LoggingMessageNotificationParam {
+                level: LoggingLevel::Info,
+                logger: Some("subagent".to_string()),
+                data: serde_json::json!({
+                    "type": "subagent_lifecycle",
+                    "subagent_id": subagent_id,
+                    "source": source,
+                    "status": status,
+                    "details": details,
+                }),
+            },
+            extensions: Default::default(),
+        })
+    }
+
+    async fn send_notification(&self, notification: ServerNotification) {
+        let subs = self.notification_subscribers.lock().await;
+        for tx in subs.iter() {
+            let _ = tx.try_send(notification.clone());
+        }
     }
 
     fn validate_delegate_params(&self, params: &DelegateParams) -> Result<(), String> {
@@ -1597,6 +1707,13 @@ impl SummonClient {
             ));
         }
 
+        let source_info = params.source.as_deref().unwrap_or("ad-hoc");
+        let instructions_preview = params
+            .instructions
+            .as_ref()
+            .map(|i| truncate(i, 50))
+            .unwrap_or_else(|| "(none)".to_string());
+
         let session = self
             .context
             .session_manager
@@ -1633,6 +1750,21 @@ impl SummonClient {
             .map_err(|e| format!("Failed to create subagent session: {}", e))?;
 
         let task_id = subagent_session.id.clone();
+
+        // Log async delegate start
+        info!(
+            "🚀 async delegate started: id={}, source={}, instructions={}",
+            task_id, source_info, instructions_preview
+        );
+
+        // Send async subagent start notification
+        let start_notification = self.create_subagent_notification(
+            &task_id,
+            source_info,
+            "started_async",
+            &instructions_preview,
+        );
+        self.send_notification(start_notification).await;
 
         let turns = Arc::new(AtomicU32::new(0));
         let last_activity = Arc::new(AtomicU64::new(current_epoch_millis()));
@@ -1688,9 +1820,9 @@ impl SummonClient {
             .insert(task_id.clone(), task);
 
         Ok(vec![Content::text(format!(
-            "Task {} started in background: \"{}\"\n\
+            "🤖 SubAgent [{}] started in background (source: {}): \"{}\"\n\
              Continue with other work. When you need the result, use load(source: \"{}\").",
-            task_id, description, task_id
+            task_id, source_info, description, task_id
         ))])
     }
 }

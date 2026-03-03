@@ -100,6 +100,17 @@ Use Markdown formatting for all responses.
   - Focus on source code and configuration files
   - Use `.gitignore` patterns as a guide for what to skip
 
+## Delegation (Subagent) Guidelines
+- **Explicit request**: If user mentions "delegate", "subagent", "explore agent", "coder agent", etc., use the `delegate` tool.
+- **Complex multi-step tasks**: Consider `delegate` for tasks that combine multiple domains (e.g., code modification + test execution + git operations).
+- **Simple tasks**: Use direct tools (grep, glob, read, shell) for speed. Don't over-delegate.
+- **Available builtin skills** (use as `delegate(source: "skill_name")`):
+  - `explore`: Fast codebase exploration and file discovery
+  - `research`: Deep analysis with web search capability
+  - `coder`: Code modifications (edit, write, refactor)
+  - `bash`: Command execution (tests, builds, git)
+  - `general`: Complex tasks spanning multiple domains
+
 ## Error Handling
 - If a command fails, explain the error clearly and specifically.
 - Suggest concrete fixes rather than generic advice.
