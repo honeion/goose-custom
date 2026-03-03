@@ -70,11 +70,12 @@ use super::text_editor::{
 };
 
 // New separated tools
-use super::file_history::FileHistory;
+use super::file_history::{new_file_history, FileHistory};
 use super::read::{read, ReadParams};
 use super::edit::{edit, EditParams};
 use super::write::{write, WriteParams};
 use super::undo::{undo, UndoParams};
+use super::notebook_edit::{notebook_edit, NotebookEditParams, NotebookOperation, CellType, read_notebook};
 
 /// Parameters for the screen_capture tool
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -245,6 +246,28 @@ pub struct UndoToolParams {
     pub steps: Option<usize>,
 }
 
+/// Parameters for the notebook_edit tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct NotebookEditToolParams {
+    /// Absolute path to the .ipynb file
+    pub path: String,
+
+    /// Cell index (0-based)
+    pub cell_index: usize,
+
+    /// New content for the cell. For multi-line content, use \n.
+    #[serde(default)]
+    pub content: Option<String>,
+
+    /// Cell type: "code", "markdown", or "raw" (default: keeps existing type)
+    #[serde(default)]
+    pub cell_type: Option<String>,
+
+    /// Operation: "replace" (default), "insert", or "delete"
+    #[serde(default)]
+    pub operation: Option<String>,
+}
+
 /// Template structure for prompt definitions
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PromptTemplate {
@@ -345,7 +368,7 @@ fn load_prompt_files() -> HashMap<String, Prompt> {
 #[derive(Clone)]
 pub struct DeveloperServer {
     tool_router: ToolRouter<Self>,
-    file_history: Arc<Mutex<HashMap<PathBuf, Vec<String>>>>,
+    file_history: FileHistory,
     ignore_patterns: Gitignore,
     editor_model: Option<EditorModel>,
     prompts: HashMap<String, Prompt>,
@@ -722,7 +745,7 @@ impl DeveloperServer {
 
         Self {
             tool_router: Self::tool_router(),
-            file_history: Arc::new(Mutex::new(HashMap::new())),
+            file_history: new_file_history(),
             ignore_patterns,
             editor_model,
             prompts: load_prompt_files(),
@@ -1137,6 +1160,49 @@ impl DeveloperServer {
         };
 
         let content = undo(undo_params, &self.file_history).await?;
+        Ok(CallToolResult::success(content))
+    }
+
+    /// Edit Jupyter notebook cells.
+    ///
+    /// Supports three operations:
+    /// - replace: Update content of existing cell
+    /// - insert: Add new cell at position
+    /// - delete: Remove cell at position
+    #[tool(
+        name = "notebook_edit",
+        description = "Edit Jupyter notebook (.ipynb) cells. Operations: 'replace' (update cell), 'insert' (add new cell), 'delete' (remove cell). Cell index is 0-based."
+    )]
+    pub async fn notebook_edit_tool(
+        &self,
+        params: Parameters<NotebookEditToolParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let path = self.resolve_path(&params.path)?;
+
+        // Parse operation
+        let operation = match params.operation.as_deref() {
+            Some("insert") => NotebookOperation::Insert,
+            Some("delete") => NotebookOperation::Delete,
+            _ => NotebookOperation::Replace,
+        };
+
+        // Parse cell type
+        let cell_type = params.cell_type.as_deref().map(|t| match t {
+            "markdown" => CellType::Markdown,
+            "raw" => CellType::Raw,
+            _ => CellType::Code,
+        });
+
+        let notebook_params = NotebookEditParams {
+            path,
+            cell_index: params.cell_index,
+            content: params.content,
+            cell_type,
+            operation,
+        };
+
+        let content = notebook_edit(notebook_params, &self.file_history).await?;
         Ok(CallToolResult::success(content))
     }
 

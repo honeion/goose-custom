@@ -2,6 +2,8 @@
 //!
 //! This module provides a shared history store that can be used by
 //! Edit, Write, and Undo tools to track file changes and enable undo operations.
+//!
+//! File contents are stored as raw bytes to preserve original encoding.
 
 use rmcp::model::{ErrorCode, ErrorData};
 use std::{
@@ -12,9 +14,10 @@ use std::{
 
 /// Shared file history for undo operations
 ///
-/// Stores previous file contents keyed by path.
+/// Stores previous file contents as raw bytes keyed by path.
 /// Each path can have multiple history entries (stack).
-pub type FileHistory = Arc<Mutex<HashMap<PathBuf, Vec<String>>>>;
+/// Using bytes preserves original file encoding.
+pub type FileHistory = Arc<Mutex<HashMap<PathBuf, Vec<Vec<u8>>>>>;
 
 /// Creates a new empty file history
 pub fn new_file_history() -> FileHistory {
@@ -24,6 +27,7 @@ pub fn new_file_history() -> FileHistory {
 /// Saves the current content of a file to history before modification
 ///
 /// Call this before any write/edit operation to enable undo.
+/// Stores raw bytes to preserve original encoding.
 pub fn save_to_history(path: &PathBuf, history: &FileHistory) -> Result<(), ErrorData> {
     let mut history_guard = history.lock().map_err(|e| {
         ErrorData::new(
@@ -34,7 +38,7 @@ pub fn save_to_history(path: &PathBuf, history: &FileHistory) -> Result<(), Erro
     })?;
 
     let content = if path.exists() {
-        std::fs::read_to_string(path).map_err(|e| {
+        std::fs::read(path).map_err(|e| {
             ErrorData::new(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to read file for history: {}", e),
@@ -42,8 +46,8 @@ pub fn save_to_history(path: &PathBuf, history: &FileHistory) -> Result<(), Erro
             )
         })?
     } else {
-        // Empty string for new files - undo will delete the file
-        String::new()
+        // Empty bytes for new files - undo will delete the file
+        Vec::new()
     };
 
     history_guard.entry(path.clone()).or_default().push(content);
@@ -52,12 +56,13 @@ pub fn save_to_history(path: &PathBuf, history: &FileHistory) -> Result<(), Erro
 
 /// Restores the previous content of a file from history
 ///
-/// Returns Ok(Some(content)) if history exists, Ok(None) if no history.
+/// Returns Ok(Some(bytes)) if history exists, Ok(None) if no history.
+/// Returns raw bytes - caller should write directly to file.
 pub fn restore_from_history(
     path: &PathBuf,
     history: &FileHistory,
     steps: usize,
-) -> Result<Option<String>, ErrorData> {
+) -> Result<Option<Vec<u8>>, ErrorData> {
     let mut history_guard = history.lock().map_err(|e| {
         ErrorData::new(
             ErrorCode::INTERNAL_ERROR,
@@ -130,7 +135,7 @@ mod tests {
 
         // Restore from history
         let restored = restore_from_history(&file_path, &history, 1).unwrap();
-        assert_eq!(restored, Some("initial content".to_string()));
+        assert_eq!(restored, Some(b"initial content".to_vec()));
     }
 
     #[test]
@@ -154,11 +159,11 @@ mod tests {
 
         // Restore 1 step - should get v2
         let restored = restore_from_history(&file_path, &history, 1).unwrap();
-        assert_eq!(restored, Some("v2".to_string()));
+        assert_eq!(restored, Some(b"v2".to_vec()));
 
         // Restore 1 more step - should get v1
         let restored = restore_from_history(&file_path, &history, 1).unwrap();
-        assert_eq!(restored, Some("v1".to_string()));
+        assert_eq!(restored, Some(b"v1".to_vec()));
 
         // No more history
         let restored = restore_from_history(&file_path, &history, 1).unwrap();
@@ -175,8 +180,8 @@ mod tests {
         // Save history for non-existent file
         save_to_history(&file_path, &history).unwrap();
 
-        // Should have empty string in history
+        // Should have empty bytes in history
         let restored = restore_from_history(&file_path, &history, 1).unwrap();
-        assert_eq!(restored, Some(String::new()));
+        assert_eq!(restored, Some(Vec::new()));
     }
 }

@@ -8,6 +8,7 @@
 use indoc::formatdoc;
 use mpatch::{apply_patch, parse_diffs, PatchError};
 use rmcp::model::{Content, ErrorCode, ErrorData, Role};
+use similar::TextDiff;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -17,6 +18,7 @@ use std::{
 use super::editor_models::EditorModel;
 use super::file_history::{save_to_history, FileHistory};
 use super::lang;
+use super::read::{decode_with_encoding_detection, encode_with_encoding};
 use super::shell::normalize_line_endings;
 
 // Constants
@@ -61,6 +63,71 @@ pub async fn edit(
     .await
 }
 
+/// Calculates similarity ratio between two strings using TextDiff
+fn calculate_similarity(a: &str, b: &str) -> f64 {
+    let diff = TextDiff::from_chars(a, b);
+    diff.ratio() as f64
+}
+
+/// Finds similar strings in the content using sequence matching
+/// Returns a list of (line_number, text, similarity_ratio) tuples
+fn find_similar_strings(content: &str, target: &str, max_results: usize) -> Vec<(usize, String, f64)> {
+    const MIN_SIMILARITY: f64 = 0.4; // 40% similarity threshold
+
+    let target_lines: Vec<&str> = target.lines().collect();
+    let target_line_count = target_lines.len();
+
+    // For single-line targets, search line by line
+    if target_line_count == 1 {
+        let target_line = target.trim();
+        let mut matches: Vec<(usize, String, f64)> = content
+            .lines()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+
+                let ratio = calculate_similarity(target_line, trimmed);
+                if ratio >= MIN_SIMILARITY {
+                    Some((idx + 1, line.to_string(), ratio))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Sort by similarity (highest first)
+        matches.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        matches.truncate(max_results);
+        return matches;
+    }
+
+    // For multi-line targets, use sliding window
+    let content_lines: Vec<&str> = content.lines().collect();
+    let mut matches: Vec<(usize, String, f64)> = Vec::new();
+
+    for start in 0..content_lines.len().saturating_sub(target_line_count - 1) {
+        let window: String = content_lines[start..start + target_line_count].join("\n");
+        let ratio = calculate_similarity(target, &window);
+
+        if ratio >= MIN_SIMILARITY {
+            let preview = if window.len() > 100 {
+                format!("{}...", &window[..97])
+            } else {
+                window
+            };
+            matches.push((start + 1, preview, ratio));
+        }
+    }
+
+    // Sort by similarity (highest first)
+    matches.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    matches.truncate(max_results);
+    matches
+}
+
 /// Replaces a string in a file
 async fn replace_string(
     path: &PathBuf,
@@ -82,14 +149,16 @@ async fn replace_string(
         ));
     }
 
-    // Read content
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    // Read raw bytes and detect encoding
+    let raw_bytes = std::fs::read(path).map_err(|e| {
         ErrorData::new(
             ErrorCode::INTERNAL_ERROR,
             format!("Failed to read file: {}", e),
             None,
         )
     })?;
+
+    let (content, detected_encoding) = decode_with_encoding_detection(&raw_bytes, path)?;
 
     // Try Editor API if configured
     if let Some(ref editor) = editor_model {
@@ -102,7 +171,9 @@ async fn replace_string(
                     normalized_content.push('\n');
                 }
 
-                std::fs::write(path, &normalized_content).map_err(|e| {
+                // Encode back to original encoding
+                let encoded_bytes = encode_with_encoding(&normalized_content, detected_encoding);
+                std::fs::write(path, &encoded_bytes).map_err(|e| {
                     ErrorData::new(
                         ErrorCode::INTERNAL_ERROR,
                         format!("Failed to write file: {}", e),
@@ -131,11 +202,33 @@ async fn replace_string(
     let match_count = content.matches(old_str).count();
 
     if match_count == 0 {
+        // Find similar strings to suggest
+        let suggestions = find_similar_strings(&content, old_str, 3);
+        let error_msg = if suggestions.is_empty() {
+            "'old_string' not found in file. Make sure it exactly matches existing content, including whitespace.".to_string()
+        } else {
+            let suggestion_text = suggestions
+                .iter()
+                .map(|(line_num, text, similarity)| {
+                    let preview = if text.len() > 60 {
+                        format!("{}...", &text[..57])
+                    } else {
+                        text.clone()
+                    };
+                    format!("  - line {}: \"{}\" ({:.0}% similar)", line_num, preview, similarity * 100.0)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            format!(
+                "'old_string' not found in file. Similar strings found:\n{}\n\nMake sure it exactly matches existing content, including whitespace.",
+                suggestion_text
+            )
+        };
+
         return Err(ErrorData::new(
             ErrorCode::INVALID_PARAMS,
-            format!(
-                "'old_string' not found in file. Make sure it exactly matches existing content, including whitespace."
-            ),
+            error_msg,
             None,
         ));
     }
@@ -165,7 +258,9 @@ async fn replace_string(
         normalized_content.push('\n');
     }
 
-    std::fs::write(path, &normalized_content).map_err(|e| {
+    // Encode back to original encoding
+    let encoded_bytes = encode_with_encoding(&normalized_content, detected_encoding);
+    std::fs::write(path, &encoded_bytes).map_err(|e| {
         ErrorData::new(
             ErrorCode::INTERNAL_ERROR,
             format!("Failed to write file: {}", e),
