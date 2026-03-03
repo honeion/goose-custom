@@ -272,6 +272,7 @@ impl Agent {
             "developer__grep",
             "developer__analyze",
             "developer__list_windows",
+            "developer__ask_user_question",  // Safe: just asks user questions
         ]
         .iter()
         .map(|s| s.to_string())

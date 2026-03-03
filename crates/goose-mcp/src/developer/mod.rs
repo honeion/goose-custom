@@ -12,6 +12,7 @@ pub mod edit;
 pub mod write;
 pub mod undo;
 pub mod notebook_edit;
+pub mod ask_user;
 
 pub mod rmcp_developer;
 

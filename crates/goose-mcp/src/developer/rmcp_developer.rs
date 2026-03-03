@@ -76,6 +76,7 @@ use super::edit::{edit, EditParams};
 use super::write::{write, WriteParams};
 use super::undo::{undo, UndoParams};
 use super::notebook_edit::{notebook_edit, NotebookEditParams, NotebookOperation, CellType, read_notebook};
+use super::ask_user::{ask_user_question, AskUserQuestionParams, Question, QuestionOption};
 
 /// Parameters for the screen_capture tool
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -266,6 +267,40 @@ pub struct NotebookEditToolParams {
     /// Operation: "replace" (default), "insert", or "delete"
     #[serde(default)]
     pub operation: Option<String>,
+}
+
+/// Option for a question in ask_user_question tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct QuestionOptionParams {
+    /// Short display label (1-5 words)
+    pub label: String,
+
+    /// Description of what this option means
+    pub description: String,
+}
+
+/// A single question in ask_user_question tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct QuestionParams {
+    /// The complete question to ask the user
+    pub question: String,
+
+    /// Short header/label for the question (max 12 chars)
+    pub header: String,
+
+    /// Available options (2-4 options). Users can always select "Other" for custom response.
+    pub options: Vec<QuestionOptionParams>,
+
+    /// Whether multiple options can be selected (default: false)
+    #[serde(default)]
+    pub multi_select: Option<bool>,
+}
+
+/// Parameters for the ask_user_question tool
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AskUserQuestionToolParams {
+    /// Questions to ask the user (1-4 questions)
+    pub questions: Vec<QuestionParams>,
 }
 
 /// Template structure for prompt definitions
@@ -1203,6 +1238,43 @@ impl DeveloperServer {
         };
 
         let content = notebook_edit(notebook_params, &self.file_history).await?;
+        Ok(CallToolResult::success(content))
+    }
+
+    /// Ask the user structured questions during execution.
+    ///
+    /// Use this tool when you need to:
+    /// - Clarify ambiguous requirements
+    /// - Select between multiple valid approaches
+    /// - Get user preferences or decisions
+    /// - Confirm understanding before proceeding
+    ///
+    /// Returns a formatted question prompt for the user to respond to.
+    #[tool(
+        name = "ask_user_question",
+        description = "Ask the user structured questions with predefined options. Use when you need to clarify requirements, select between approaches, or get user decisions. Supports 1-4 questions with 2-4 options each. Users can also provide custom 'Other' responses."
+    )]
+    pub async fn ask_user_question_tool(
+        &self,
+        params: Parameters<AskUserQuestionToolParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+
+        // Convert tool params to internal params
+        let questions: Vec<Question> = params.questions.into_iter().map(|q| {
+            Question {
+                question: q.question,
+                header: q.header,
+                options: q.options.into_iter().map(|o| QuestionOption {
+                    label: o.label,
+                    description: o.description,
+                }).collect(),
+                multi_select: q.multi_select.unwrap_or(false),
+            }
+        }).collect();
+
+        let internal_params = AskUserQuestionParams { questions };
+        let content = ask_user_question(internal_params).await?;
         Ok(CallToolResult::success(content))
     }
 
