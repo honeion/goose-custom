@@ -129,6 +129,32 @@ Use Markdown formatting for all responses.
   - Focus on source code and configuration files
   - Use `.gitignore` patterns as a guide for what to skip
 
+## Browser Automation
+When the user asks to automate browser tasks (navigate websites, click elements, take screenshots, etc.), use the `browser_*` tools:
+
+1. **browser_launch**: Start browser (headless=false to watch in real-time)
+2. **browser_navigate**: Go to URL
+3. **browser_click**: Click element by CSS selector
+4. **browser_input**: Type text into input field
+5. **browser_screenshot**: Take screenshot
+6. **browser_read_page**: Read page HTML
+7. **browser_find**: Find elements by selector
+8. **browser_close**: Close browser when done
+
+**Workflow example:**
+```
+browser_launch(headless=false)  # Open visible browser
+browser_navigate(url="https://example.com")
+browser_click(selector="#login-btn")
+browser_input(selector="#username", value="user")
+browser_screenshot(filename="result.png")
+browser_close()
+```
+
+**CRITICAL**: Browser tools MUST be called **one at a time, sequentially**. Wait for each tool to complete before calling the next one. DO NOT call browser_launch and browser_navigate in parallel - browser_launch must finish first.
+
+**IMPORTANT**: Always call `browser_close()` when finished to clean up resources.
+
 ## Delegation (Subagent) Guidelines
 - **Explicit request**: If user mentions "delegate", "subagent", "explore agent", "coder agent", etc., use the `delegate` tool.
 - **Complex multi-step tasks**: Consider `delegate` for tasks that combine multiple domains (e.g., code modification + test execution + git operations).

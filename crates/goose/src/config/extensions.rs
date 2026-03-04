@@ -13,6 +13,12 @@ pub const DEFAULT_EXTENSION_DESCRIPTION: &str = "";
 pub const DEFAULT_DISPLAY_NAME: &str = "Developer";
 const EXTENSIONS_CONFIG_KEY: &str = "extensions";
 
+/// Default builtin extensions that are always enabled when config is empty
+pub const DEFAULT_BUILTIN_EXTENSIONS: &[(&str, &str)] = &[
+    ("developer", "Developer"),
+    ("browser", "Browser"),
+];
+
 #[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct ExtensionEntry {
     pub enabled: bool,
@@ -130,20 +136,49 @@ pub fn is_extension_enabled(key: &str) -> bool {
     extensions.get(key).map(|e| e.enabled).unwrap_or(false)
 }
 
+/// Returns the default builtin extension configs
+fn default_builtin_extension(name: &str, display_name: &str) -> ExtensionConfig {
+    ExtensionConfig::Builtin {
+        name: name.to_string(),
+        display_name: Some(display_name.to_string()),
+        description: format!("Default {} extension", name),
+        timeout: Some(DEFAULT_EXTENSION_TIMEOUT),
+        bundled: Some(true),
+        available_tools: Vec::new(),
+    }
+}
+
+/// Ensures default builtin extensions are included in the list
+fn ensure_default_extensions(mut extensions: Vec<ExtensionConfig>) -> Vec<ExtensionConfig> {
+    for (name, display_name) in DEFAULT_BUILTIN_EXTENSIONS {
+        let exists = extensions.iter().any(|ext| ext.name() == *name);
+        if !exists {
+            extensions.push(default_builtin_extension(name, display_name));
+        }
+    }
+    extensions
+}
+
 pub fn get_enabled_extensions() -> Vec<ExtensionConfig> {
-    get_all_extensions()
+    let extensions: Vec<_> = get_all_extensions()
         .into_iter()
         .filter(|ext| ext.enabled)
         .map(|ext| ext.config)
-        .collect()
+        .collect();
+
+    // Ensure default builtin extensions are always included
+    ensure_default_extensions(extensions)
 }
 
 pub fn get_enabled_extensions_with_config(config: &Config) -> Vec<ExtensionConfig> {
-    get_extensions_map_with_config(config)
+    let extensions: Vec<_> = get_extensions_map_with_config(config)
         .into_values()
         .filter(|ext| ext.enabled)
         .map(|ext| ext.config)
-        .collect()
+        .collect();
+
+    // Ensure default builtin extensions are always included
+    ensure_default_extensions(extensions)
 }
 
 pub fn get_warnings() -> Vec<String> {

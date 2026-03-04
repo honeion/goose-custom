@@ -273,6 +273,15 @@ impl Agent {
             "developer__analyze",
             "developer__list_windows",
             "developer__ask_user_question",  // Safe: just asks user questions
+            // Browser automation tools - safe, don't modify system files
+            "browser__browser_launch",
+            "browser__browser_navigate",
+            "browser__browser_click",
+            "browser__browser_input",
+            "browser__browser_screenshot",
+            "browser__browser_read_page",
+            "browser__browser_find",
+            "browser__browser_close",
         ]
         .iter()
         .map(|s| s.to_string())
