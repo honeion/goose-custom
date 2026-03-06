@@ -8,6 +8,8 @@ pub mod output;
 pub mod streaming_buffer;
 mod task_execution_display;
 mod thinking;
+pub mod tui;
+pub mod tui_session;
 
 use crate::session::task_execution_display::{
     format_task_execution_notification, TASK_EXECUTION_NOTIFICATION_TYPE,
@@ -167,14 +169,14 @@ impl HistoryManager {
 }
 
 pub struct CliSession {
-    agent: Agent,
-    messages: Conversation,
-    session_id: String,
+    pub(crate) agent: Agent,
+    pub(crate) messages: Conversation,
+    pub(crate) session_id: String,
     completion_cache: Arc<std::sync::RwLock<CompletionCache>>,
-    debug: bool,
+    pub(crate) debug: bool,
     run_mode: RunMode,
-    scheduled_job_id: Option<String>,
-    max_turns: Option<u32>,
+    pub(crate) scheduled_job_id: Option<String>,
+    pub(crate) max_turns: Option<u32>,
     edit_mode: Option<EditMode>,
     retry_config: Option<RetryConfig>,
     output_format: String,
@@ -280,6 +282,16 @@ impl CliSession {
 
     pub fn session_id(&self) -> &String {
         &self.session_id
+    }
+
+    /// TUI용 SessionConfig 생성
+    pub fn get_session_config(&self) -> SessionConfig {
+        SessionConfig {
+            id: self.session_id.clone(),
+            schedule_id: self.scheduled_job_id.clone(),
+            max_turns: self.max_turns,
+            retry_config: self.retry_config.clone(),
+        }
     }
 
     /// Parse a stdio extension command string into an ExtensionConfig

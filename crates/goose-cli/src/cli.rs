@@ -84,6 +84,13 @@ pub struct SessionOptions {
     pub debug: bool,
 
     #[arg(
+        long,
+        help = "Use Ratatui TUI mode (Phase 5 - experimental)",
+        long_help = "Enable the new Ratatui-based terminal UI with modern design, vim keybindings, and animations."
+    )]
+    pub tui: bool,
+
+    #[arg(
         long = "max-tool-repetitions",
         value_name = "NUMBER",
         help = "Maximum number of consecutive identical tool calls allowed",
@@ -1127,6 +1134,46 @@ async fn handle_interactive_session(
         set_verbosity(Verbosity::Verbose);
     } else if session_opts.debug {
         set_verbosity(Verbosity::Debug);
+    }
+
+    // TUI 모드 (Phase 5 - 에이전트 연동)
+    if session_opts.tui {
+        let mut session_id = get_or_create_session_id(identifier.clone(), resume, false).await?;
+
+        if fork {
+            if let Some(id) = session_id {
+                let session_manager = SessionManager::instance();
+                let original = session_manager.get_session(&id, false).await?;
+                let copied = session_manager.copy_session(&id, original.name).await?;
+                session_id = Some(copied.id);
+            }
+        }
+
+        let mut session: crate::CliSession = build_session(SessionBuilderConfig {
+            session_id,
+            resume,
+            fork,
+            no_session: false,
+            extensions: extension_opts.extensions.clone(),
+            streamable_http_extensions: extension_opts.streamable_http_extensions.clone(),
+            builtins: extension_opts.builtins.clone(),
+            no_profile: extension_opts.no_profile,
+            recipe: None,
+            additional_system_prompt: None,
+            provider: None,
+            model: None,
+            debug: session_opts.debug,
+            max_tool_repetitions: session_opts.max_tool_repetitions,
+            max_turns: session_opts.max_turns,
+            scheduled_job_id: None,
+            interactive: true,
+            quiet: session_opts.quiet,
+            output_format: "text".to_string(),
+            container: session_opts.container.clone().map(Container::new),
+        })
+        .await;
+
+        return crate::session::tui_session::run_tui_session(&mut session).await;
     }
 
     let session_start = std::time::Instant::now();
