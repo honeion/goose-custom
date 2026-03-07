@@ -3,10 +3,13 @@
 //! TEA (Elm Architecture) 패턴의 Model 역할
 //! Phase 5: Ratatui UI 고도화
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
+// use ratatui::layout::Rect;  // TachyonFX 전용
 use rmcp::model::Role;
+// TachyonFX 비활성화 - 깜빡거림 이슈로 사용하지 않음
+// use tachyonfx::{fx, Effect, Interpolation, Shader};
 use tui_textarea::TextArea;
 
 use super::animation::SpinnerFrames;
@@ -292,6 +295,11 @@ pub struct TuiApp<'a> {
     // 애니메이션
     pub spinner: SpinnerFrames,
     pub last_tick: Instant,
+
+    // TachyonFX 효과 - 비활성화 (깜빡거림 이슈)
+    // pub message_effect: Option<Effect>,
+    // pub effect_area: Option<Rect>,
+    // pub effect_start: Option<Instant>,
 }
 
 impl<'a> TuiApp<'a> {
@@ -329,8 +337,21 @@ impl<'a> TuiApp<'a> {
 
             spinner: SpinnerFrames::new(),
             last_tick: Instant::now(),
+
+            // TachyonFX 비활성화
+            // message_effect: None,
+            // effect_area: None,
+            // effect_start: None,
         }
     }
+
+    // TachyonFX 효과 - 비활성화 (깜빡거림 이슈)
+    // /// 새 메시지에 fade-in 효과 시작
+    // pub fn start_message_effect(&mut self) { ... }
+    // /// 효과 영역 설정 (렌더링 시 호출)
+    // pub fn set_effect_area(&mut self, area: Rect) { ... }
+    // /// 효과 처리 및 버퍼에 적용
+    // pub fn process_effects(&mut self, buf: &mut ratatui::buffer::Buffer) { ... }
 
     /// 현재 포커스된 패널 ID
     pub fn focused_panel(&self) -> PanelId {

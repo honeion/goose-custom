@@ -48,7 +48,7 @@ impl<'a> TuiApp<'a> {
         self.render_header(frame, chunks[0]);
 
         // 도구 출력 패널 활성화 시 좌우 분할
-        if self.panels.show_tool_output {
+        let conversation_area = if self.panels.show_tool_output {
             let content_chunks = Layout::horizontal([
                 Constraint::Percentage(35),  // 도구 출력
                 Constraint::Percentage(65),  // 대화
@@ -57,9 +57,11 @@ impl<'a> TuiApp<'a> {
 
             self.render_tool_output_panel(frame, content_chunks[0]);
             self.render_conversation(frame, content_chunks[1]);
+            content_chunks[1]
         } else {
             self.render_conversation(frame, chunks[1]);
-        }
+            chunks[1]
+        };
 
         self.render_tool_status(frame, chunks[2]);
         self.render_input(frame, chunks[3]);
@@ -69,6 +71,12 @@ impl<'a> TuiApp<'a> {
         if self.show_help {
             self.render_help_popup(frame, area);
         }
+
+        // TachyonFX 효과 - 비활성화 (깜빡거림 이슈)
+        // if self.message_effect.is_some() {
+        //     self.set_effect_area(conversation_area);
+        //     self.process_effects(frame.buffer_mut());
+        // }
     }
 
     /// 도구 출력 패널 렌더링
