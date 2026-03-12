@@ -46,6 +46,8 @@ pub enum Action {
     FocusPanel(PanelId),
     /// 도구 출력 패널 토글 (F3)
     ToggleToolPanel,
+    /// 붙여넣기 (멀티라인 지원)
+    Paste(String),
     /// 마우스 클릭 (패널 포커스용)
     MouseClick(u16, u16),
     /// 패널 포커스 토글 (Tab)
@@ -141,6 +143,20 @@ impl<'a> TuiApp<'a> {
 
             Action::HistoryNext => {
                 self.history_next();
+                UpdateResult::Continue
+            }
+
+            Action::Paste(text) => {
+                // 멀티라인 붙여넣기: 각 줄을 입력창에 삽입
+                let line_count = text.lines().count();
+                tracing::info!("Action::Paste processing: {} lines, {} chars", line_count, text.len());
+                for (i, line) in text.lines().enumerate() {
+                    if i > 0 {
+                        self.input.insert_newline();
+                    }
+                    self.input.insert_str(line);
+                }
+                tracing::info!("After paste, input lines: {}", self.input.lines().len());
                 UpdateResult::Continue
             }
 
@@ -250,12 +266,47 @@ impl<'a> TuiApp<'a> {
 
     /// Insert 모드 키 처리
     fn handle_insert_mode_key(&mut self, key: KeyEvent) -> Option<Action> {
+        use std::time::Instant;
+
+        // 빠른 입력 감지 (붙여넣기 및 휠 스크롤 판별)
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_char_time);
+        let is_rapid = elapsed.as_millis() < 50; // 50ms 이내면 빠른 입력
+
+        // 모든 키 입력 시간 추적 (↑↓ 포함)
+        let update_time = matches!(key.code, KeyCode::Char(_) | KeyCode::Up | KeyCode::Down);
+        if update_time {
+            // 문자 입력일 때만 붙여넣기 카운트
+            if let KeyCode::Char(_) = key.code {
+                if elapsed.as_millis() < 15 {
+                    self.rapid_input_count += 1;
+                } else {
+                    self.rapid_input_count = 0;
+                }
+                // 5개 이상 연속 빠른 입력이면 붙여넣기로 판단
+                if self.rapid_input_count >= 5 {
+                    self.just_pasted = true;
+                }
+            }
+            self.last_char_time = now;
+        }
+
         match (key.code, key.modifiers) {
             // 종료
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Action::Quit),
 
-            // 전송
-            (KeyCode::Enter, KeyModifiers::NONE) => Some(Action::Submit),
+            // 전송 (Enter)
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                // 붙여넣기 직후 Enter는 무시 (터미널이 보내는 잔여 Enter 방지)
+                if self.just_pasted {
+                    self.just_pasted = false;
+                    self.rapid_input_count = 0;
+                    // Enter를 새 줄로 처리
+                    self.input.insert_newline();
+                    return None;
+                }
+                Some(Action::Submit)
+            }
 
             // 새 줄 (Shift+Enter)
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
@@ -266,9 +317,80 @@ impl<'a> TuiApp<'a> {
             // Normal 모드로 전환
             (KeyCode::Esc, _) => Some(Action::SwitchMode(InputMode::Normal)),
 
-            // 히스토리 탐색 (↑/↓)
-            (KeyCode::Up, KeyModifiers::NONE) => Some(Action::HistoryPrev),
-            (KeyCode::Down, KeyModifiers::NONE) => Some(Action::HistoryNext),
+            // 히스토리 탐색 (↑↓)
+            // 마우스 캡처 OFF 상태에서 ↑↓는 무조건 스크롤 (터미널이 휠을 키로 변환)
+            // 마우스 캡처 ON 상태에서만 히스토리 탐색
+            (KeyCode::Up, KeyModifiers::NONE) => {
+                if !self.mouse_capture {
+                    // 마우스 캡처 OFF = 터미널 모드 = ↑↓는 스크롤
+                    return Some(Action::ScrollUp(3));
+                }
+                let (row, _col) = self.input.cursor();
+                if self.input.lines().len() <= 1 || row == 0 {
+                    Some(Action::HistoryPrev)
+                } else {
+                    self.input.input(key);
+                    None
+                }
+            }
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                if !self.mouse_capture {
+                    // 마우스 캡처 OFF = 터미널 모드 = ↑↓는 스크롤
+                    return Some(Action::ScrollDown(3));
+                }
+                let (row, _col) = self.input.cursor();
+                let last_row = self.input.lines().len().saturating_sub(1);
+                if self.input.lines().len() <= 1 || row >= last_row {
+                    Some(Action::HistoryNext)
+                } else {
+                    self.input.input(key);
+                    None
+                }
+            }
+
+            // 붙여넣기 (Ctrl+V 또는 Ctrl+Shift+V) - 클립보드에서 직접 읽기
+            (KeyCode::Char('v'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                tracing::info!("Paste key detected (mods={:?}), trying clipboard...", mods);
+                match arboard::Clipboard::new() {
+                    Ok(mut clipboard) => {
+                        match clipboard.get_text() {
+                            Ok(text) => {
+                                tracing::info!("Clipboard read OK: {} chars", text.len());
+                                self.just_pasted = true;
+                                return Some(Action::Paste(text));
+                            }
+                            Err(e) => {
+                                tracing::error!("Clipboard get_text failed: {:?}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Clipboard::new failed: {:?}", e);
+                    }
+                }
+                None
+            }
+            (KeyCode::Char('V'), mods) if mods.contains(KeyModifiers::CONTROL) => {
+                tracing::info!("Paste key (V) detected (mods={:?}), trying clipboard...", mods);
+                match arboard::Clipboard::new() {
+                    Ok(mut clipboard) => {
+                        match clipboard.get_text() {
+                            Ok(text) => {
+                                tracing::info!("Clipboard read OK: {} chars", text.len());
+                                self.just_pasted = true;
+                                return Some(Action::Paste(text));
+                            }
+                            Err(e) => {
+                                tracing::error!("Clipboard get_text failed: {:?}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Clipboard::new failed: {:?}", e);
+                    }
+                }
+                None
+            }
 
             // 스크롤 (Ctrl+화살표, PageUp/Down)
             (KeyCode::Up, KeyModifiers::CONTROL) => Some(Action::ScrollUp(1)),
@@ -366,8 +488,19 @@ impl<'a> TuiApp<'a> {
 
 /// crossterm 이벤트를 Action으로 변환
 pub fn event_to_action(event: Event, app: &mut TuiApp) -> Option<Action> {
+    // 디버그: Paste 이벤트만 INFO 로깅 (키 이벤트는 너무 많음)
+    if matches!(event, Event::Paste(_)) {
+        tracing::info!("PASTE EVENT received: {:?}", event);
+    }
+
     match event {
-        Event::Key(key) => app.handle_key_event(key),
+        Event::Key(key) => {
+            // Ctrl+V 감지 로깅
+            if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                tracing::info!("Ctrl+V key detected");
+            }
+            app.handle_key_event(key)
+        }
         Event::Resize(w, h) => Some(Action::Resize(w, h)),
         Event::FocusGained | Event::FocusLost => None,
         Event::Mouse(mouse) => {
@@ -385,7 +518,10 @@ pub fn event_to_action(event: Event, app: &mut TuiApp) -> Option<Action> {
                 _ => None, // 드래그 등은 무시 (Shift+드래그로 텍스트 선택)
             }
         }
-        Event::Paste(_) => None, // TODO: 붙여넣기 지원
+        Event::Paste(text) => {
+            tracing::info!("Event::Paste received: {} chars", text.len());
+            Some(Action::Paste(text))
+        }
     }
 }
 

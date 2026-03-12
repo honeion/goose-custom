@@ -44,6 +44,7 @@ use crate::providers::base::{PermissionRouting, Provider};
 use crate::providers::errors::ProviderError;
 use crate::recipe::{Author, Recipe, Response, Settings};
 use crate::scheduler_trait::SchedulerTrait;
+use crate::security::pii_masker::PiiMasker;
 use crate::security::security_inspector::SecurityInspector;
 use crate::session::extension_data::{EnabledExtensionsState, ExtensionState};
 use crate::session::{Session, SessionManager};
@@ -153,6 +154,8 @@ pub struct Agent {
     container: Mutex<Option<Container>>,
     /// Optional filter for allowed tools. If set, only tools matching these names are available.
     tool_filter: Mutex<Option<Vec<String>>>,
+    /// PII 마스킹 처리기 (민감 정보 보호)
+    pii_masker: Mutex<PiiMasker>,
 }
 
 #[derive(Clone, Debug)]
@@ -252,6 +255,128 @@ impl Agent {
             tool_inspection_manager: Self::create_tool_inspection_manager(permission_manager),
             container: Mutex::new(None),
             tool_filter: Mutex::new(None),
+            pii_masker: Mutex::new(PiiMasker::new()),
+        }
+    }
+
+    // === PII 마스킹 메서드 ===
+
+    /// PII 마스킹 활성화 여부 확인
+    fn is_pii_masking_enabled() -> bool {
+        Config::global()
+            .get_param::<bool>("PII_MASKING_ENABLED")
+            .unwrap_or(true)  // 기본값: 활성화
+    }
+
+    /// 텍스트에서 민감 정보 마스킹
+    pub async fn mask_pii(&self, text: &str) -> String {
+        if !Self::is_pii_masking_enabled() {
+            return text.to_string();
+        }
+        let mut masker = self.pii_masker.lock().await;
+        let result = masker.mask(text);
+        if result.masked_count > 0 {
+            tracing::info!(
+                monotonic_counter.goose.pii_masked = result.masked_count as u64,
+                "PII 마스킹: {} 개 항목 마스킹됨",
+                result.masked_count
+            );
+            for item in &result.masked_items {
+                tracing::debug!(
+                    token = %item.token,
+                    pattern = %item.pattern_name,
+                    preview = %item.partial_original,
+                    "마스킹된 항목"
+                );
+            }
+        }
+        result.masked_text
+    }
+
+    /// 마스킹된 텍스트 복원
+    pub async fn unmask_pii(&self, text: &str) -> String {
+        if !Self::is_pii_masking_enabled() {
+            return text.to_string();
+        }
+        let masker = self.pii_masker.lock().await;
+        masker.unmask(text)
+    }
+
+    /// 현재 마스킹된 항목 수 조회
+    pub async fn pii_masked_count(&self) -> usize {
+        let masker = self.pii_masker.lock().await;
+        masker.masked_count()
+    }
+
+    /// 세션 종료 시 마스킹 테이블 초기화
+    pub async fn clear_pii_mappings(&self) {
+        let mut masker = self.pii_masker.lock().await;
+        masker.clear();
+        tracing::debug!("PII 마스킹 테이블 초기화됨");
+    }
+
+    /// Message의 텍스트 콘텐츠 마스킹
+    pub async fn mask_message(&self, message: &Message) -> Message {
+        if !Self::is_pii_masking_enabled() {
+            return message.clone();
+        }
+
+        let mut masked_content = Vec::new();
+        let mut masker = self.pii_masker.lock().await;
+
+        for content in &message.content {
+            match content {
+                MessageContent::Text(text_content) => {
+                    let result = masker.mask(&text_content.text);
+                    if result.masked_count > 0 {
+                        tracing::info!(
+                            monotonic_counter.goose.pii_masked = result.masked_count as u64,
+                            "PII 마스킹: {} 개 항목",
+                            result.masked_count
+                        );
+                    }
+                    masked_content.push(MessageContent::text(&result.masked_text));
+                }
+                // 다른 콘텐츠 타입은 그대로 유지
+                other => masked_content.push(other.clone()),
+            }
+        }
+
+        Message {
+            content: masked_content,
+            ..message.clone()
+        }
+    }
+
+    /// Message의 텍스트 콘텐츠 복원
+    pub async fn unmask_message(&self, message: &Message) -> Message {
+        let enabled = Self::is_pii_masking_enabled();
+        tracing::debug!("unmask_message 호출됨, PII_MASKING_ENABLED={}", enabled);
+
+        if !enabled {
+            return message.clone();
+        }
+
+        let mut unmasked_content = Vec::new();
+        let masker = self.pii_masker.lock().await;
+        let mapping_count = masker.masked_count();
+        tracing::debug!("현재 마스킹 매핑 수: {}", mapping_count);
+
+        for content in &message.content {
+            match content {
+                MessageContent::Text(text_content) => {
+                    tracing::debug!("언마스킹 전: {}", &text_content.text);
+                    let restored = masker.unmask(&text_content.text);
+                    tracing::debug!("언마스킹 후: {}", &restored);
+                    unmasked_content.push(MessageContent::text(&restored));
+                }
+                other => unmasked_content.push(other.clone()),
+            }
+        }
+
+        Message {
+            content: unmasked_content,
+            ..message.clone()
         }
     }
 
@@ -947,6 +1072,9 @@ impl Agent {
     ) -> Result<BoxStream<'_, Result<AgentEvent>>> {
         let session_manager = self.config.session_manager.clone();
 
+        // PII 마스킹: LLM에 전송할 메시지는 마스킹, UI 표시용은 원본 유지
+        let masked_user_message = self.mask_message(&user_message).await;
+
         let message_text_for_trace = user_message.as_concat_text();
         tracing::Span::current().record("user_message", message_text_for_trace.as_str());
         tracing::Span::current().record("trace_input", message_text_for_trace.as_str());
@@ -969,7 +1097,7 @@ impl Agent {
                         })));
                     }
                     session_manager
-                        .add_message(&session_config.id, &user_message)
+                        .add_message(&session_config.id, &masked_user_message)
                         .await?;
                     return Ok(Box::pin(futures::stream::empty()));
                 }
@@ -1005,7 +1133,7 @@ impl Agent {
                 session_manager
                     .add_message(
                         &session_config.id,
-                        &user_message.clone().with_visibility(true, false),
+                        &masked_user_message.clone().with_visibility(true, false),
                     )
                     .await?;
                 session_manager
@@ -1040,7 +1168,7 @@ impl Agent {
                 session_manager
                     .add_message(
                         &session_config.id,
-                        &user_message.clone().with_visibility(true, false),
+                        &masked_user_message.clone().with_visibility(true, false),
                     )
                     .await?;
                 session_manager
@@ -1052,7 +1180,7 @@ impl Agent {
             }
             Ok(None) => {
                 session_manager
-                    .add_message(&session_config.id, &user_message)
+                    .add_message(&session_config.id, &masked_user_message)
                     .await?;
             }
         }
@@ -1283,14 +1411,24 @@ impl Agent {
                                     filtered_response,
                                 } = self.categorize_tools(&response, &tools).await;
 
+                                // 스트리밍 중에는 원본 그대로 표시 (토큰이 쪼개져 올 수 있음)
                                 yield AgentEvent::Message(filtered_response.clone());
                                 tokio::task::yield_now().await;
 
                                 let num_tool_requests = frontend_requests.len() + remaining_requests.len();
                                 if num_tool_requests == 0 {
+                                    // 응답 완료: 전체 텍스트를 언마스킹하여 최종 버전 전송
                                     let text = filtered_response.as_concat_text();
                                     if !text.is_empty() {
-                                        last_assistant_text = text;
+                                        let unmasked_text = self.unmask_pii(&text).await;
+                                        // 마스킹된 토큰이 있었다면 교체 메시지 전송
+                                        if unmasked_text != text {
+                                            tracing::info!("PII 언마스킹 완료: 최종 응답에서 토큰 복원됨");
+                                            // 언마스킹된 최종 메시지로 교체
+                                            let final_message = Message::assistant().with_text(&unmasked_text);
+                                            yield AgentEvent::Message(final_message);
+                                        }
+                                        last_assistant_text = unmasked_text;
                                     }
                                     messages_to_add.push(response.clone());
                                     continue;
@@ -1525,7 +1663,9 @@ impl Agent {
                                         messages_to_add.push(request_msg);
                                         let final_response = tool_response_messages[idx]
                                                                 .lock().await.clone();
-                                        yield AgentEvent::Message(final_response.clone());
+                                        // PII 언마스킹: 도구 실행 결과도 언마스킹
+                                        let unmasked_final_response = self.unmask_message(&final_response).await;
+                                        yield AgentEvent::Message(unmasked_final_response);
                                         messages_to_add.push(final_response);
                                     } else {
                                         let error_msg = format!(

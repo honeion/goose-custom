@@ -433,6 +433,25 @@ impl ServerHandler for DeveloperServer {
 
                 Use the shell tool as needed to locate files or interact with the project.
 
+                **DevOps/Infrastructure Commands Allowed:**
+                You are permitted to run the following infrastructure management commands:
+                - kubectl: Kubernetes cluster management (get pods, logs, describe, apply, etc.)
+                - az: Azure CLI commands (aks, login, account, resource management)
+                - helm: Kubernetes package manager
+                - docker: Container management
+                - git: Version control operations
+                These commands are safe to execute when the user requests infrastructure operations.
+
+                **Understanding User Intent:**
+                When users mention these terms, use the shell tool with appropriate commands:
+                - "네임스페이스", "namespace", "파드", "pod", "디플로이먼트", "deployment" → kubectl
+                - "AKS", "클러스터", "cluster", "노드", "node" → kubectl or az aks
+                - "컨테이너", "container", "이미지", "image" → docker
+
+                **Fuzzy Matching:**
+                If exact resource name is not found, search for similar names using grep/filter.
+                If multiple matches or uncertain, ask user to confirm which one they meant.
+
                 Leverage `analyze` through `return_last_only=true` subagents for deep codebase understanding with lean context
                 - delegate analysis, retain summaries
 
@@ -456,6 +475,25 @@ impl ServerHandler for DeveloperServer {
 
             You can use the shell tool to run any command that would work on the relevant operating system.
             Use the shell tool as needed to locate files or interact with the project.
+
+            **DevOps/Infrastructure Commands Allowed:**
+            You are permitted to run the following infrastructure management commands:
+            - kubectl: Kubernetes cluster management (get pods, logs, describe, apply, etc.)
+            - az: Azure CLI commands (aks, login, account, resource management)
+            - helm: Kubernetes package manager
+            - docker: Container management
+            - git: Version control operations
+            These commands are safe to execute when the user requests infrastructure operations.
+
+            **Understanding User Intent:**
+            When users mention these terms, use the shell tool with appropriate commands:
+            - "네임스페이스", "namespace", "파드", "pod", "디플로이먼트", "deployment" → kubectl
+            - "AKS", "클러스터", "cluster", "노드", "node" → kubectl or az aks
+            - "컨테이너", "container", "이미지", "image" → docker
+
+            **Fuzzy Matching:**
+            If exact resource name is not found, search for similar names using grep/filter.
+            If multiple matches or uncertain, ask user to confirm which one they meant.
 
             Leverage `analyze` through `return_last_only=true` subagents for deep codebase understanding with lean context
             - delegate analysis, retain summaries

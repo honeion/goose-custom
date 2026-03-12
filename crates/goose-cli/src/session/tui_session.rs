@@ -9,12 +9,15 @@ use anyhow::Result;
 use crossterm::event;
 use futures::StreamExt;
 use goose::agents::AgentEvent;
-use goose::conversation::message::Message;
+use goose::config::Config;
+use goose::conversation::message::{ActionRequiredData, Message, MessageContent};
+use goose::permission::permission_confirmation::PrincipalType;
+use goose::permission::{Permission, PermissionConfirmation};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{stdout, Stdout};
 use crossterm::{
     execute,
-    event::{EnableMouseCapture, DisableMouseCapture},
+    event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use tokio_util::sync::CancellationToken;
@@ -30,7 +33,7 @@ pub async fn run_tui_session(session: &mut CliSession) -> Result<()> {
     // 터미널 초기화
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -38,7 +41,7 @@ pub async fn run_tui_session(session: &mut CliSession) -> Result<()> {
 
     // 터미널 정리 (에러 발생해도 반드시 실행)
     let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste);
     let _ = terminal.show_cursor();
 
     // 에러 있으면 출력
@@ -60,8 +63,18 @@ async fn run_tui_loop(
     let model_name = format!("{} {}", provider, model);
     let mut app = TuiApp::new(session.session_id.clone(), model_name);
 
+    // PII 마스킹 상태 설정 (기본: 활성화)
+    app.pii_masking_enabled = Config::global()
+        .get_param::<bool>("PII_MASKING_ENABLED")
+        .unwrap_or(true);
+
     // 환영 메시지
-    app.add_system_message("Goose Custom TUI 세션이 시작되었습니다.".to_string());
+    let welcome_msg = if app.pii_masking_enabled {
+        "Goose Custom TUI 세션이 시작되었습니다. 🔒 민감정보 보호 활성화".to_string()
+    } else {
+        "Goose Custom TUI 세션이 시작되었습니다.".to_string()
+    };
+    app.add_system_message(welcome_msg);
 
     // 기존 메시지 히스토리 로드
     for msg in &session.messages {
@@ -164,12 +177,29 @@ async fn process_agent_message(
     let cancel_token = CancellationToken::new();
 
     // 에이전트 스트림 시작
-    let mut stream = session
+    let stream = session
         .agent
         .reply(user_message, session_config, Some(cancel_token.clone()))
         .await?;
 
+    // PII 마스킹 카운트 업데이트 및 알림 (마스킹은 reply() 내부에서 발생)
+    if app.pii_masking_enabled {
+        let prev_count = app.pii_masked_count;
+        let new_count = session.agent.pii_masked_count().await;
+        if new_count > prev_count {
+            let masked_this_time = new_count - prev_count;
+            app.add_system_message(format!(
+                "🔒 민감정보 {}개가 마스킹되었습니다. AI에게는 [SECRET_N] 형태로 전달됩니다.",
+                masked_this_time
+            ));
+        }
+        app.pii_masked_count = new_count;
+        // 화면 갱신
+        terminal.draw(|frame| app.render(frame))?;
+    }
+
     // 스트림 처리 - 이벤트와 스트림을 번갈아 처리
+    let mut stream = std::pin::pin!(stream);
     loop {
         // 1. 먼저 대기중인 이벤트 모두 처리 (논블로킹)
         while event::poll(Duration::from_millis(0))? {
@@ -196,82 +226,107 @@ async fn process_agent_message(
         // 3. 렌더링
         terminal.draw(|frame| app.render(frame))?;
 
-        // 4. 스트림에서 데이터 가져오기 (짧은 타임아웃)
-        tokio::select! {
-            result = stream.next() => {
-                match result {
-                    Some(Ok(AgentEvent::Message(message))) => {
-                        // 텍스트 추출 및 대화창에 추가
-                        let text = extract_text_content(&message);
-                        if let Some(last_msg) = app.messages.last_mut() {
-                            if last_msg.is_streaming && !text.is_empty() {
-                                last_msg.content.push_str(&text);
-                            }
-                        }
+        // 4. 스트림에서 데이터 가져오기 (biased select로 UI 우선)
+        let stream_result = tokio::select! {
+            biased;
+            // 50ms 후 타임아웃 (UI 반응성)
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                // 타임아웃 - yield 후 다시 시도
+                tokio::task::yield_now().await;
+                continue;
+            }
+            // 스트림 이벤트
+            result = stream.next() => result,
+        };
 
-                        // 도구 관련 콘텐츠 처리
-                        for content in &message.content {
-                            match content {
-                                goose::conversation::message::MessageContent::ToolRequest(req) => {
-                                    app.push_tool_text(&format!("▶ {}", req.to_readable_string()));
-                                    app.start_tool(req.to_readable_string().split('(').next().unwrap_or("tool").to_string());
-                                }
-                                goose::conversation::message::MessageContent::ToolResponse(res) => {
-                                    let output = match &res.tool_result {
-                                        Ok(result) => {
-                                            result.content.iter()
-                                                .filter_map(|c| c.as_text().map(|t| t.text.clone()))
-                                                .collect::<Vec<_>>()
-                                                .join("\n")
-                                        }
-                                        Err(e) => format!("Error: {}", e.message),
-                                    };
-                                    // SUMMARY만 추출 (상세 목록 제외)
-                                    let summary = extract_tool_summary(&output);
-                                    app.push_tool_text(&format!("✓ {}", summary));
-                                    app.finish_tool();
-                                }
-                                _ => {} // Text 등 다른 타입은 무시
-                            }
-                        }
-
-                        app.tool_status = super::tui::ToolStatus::None;
-                    }
-                    Some(Ok(AgentEvent::McpNotification((ext_id, notification)))) => {
-                        // MCP 알림에서 도구 정보 추출
-                        handle_mcp_notification(&ext_id, &notification, app);
-                    }
-                    Some(Ok(AgentEvent::HistoryReplaced(updated_conversation))) => {
-                        session.messages = updated_conversation;
-                    }
-                    Some(Ok(AgentEvent::ModelChange { model, mode: _ })) => {
-                        app.model_name = model;
-                    }
-                    Some(Err(e)) => {
-                        app.tool_status = super::tui::ToolStatus::Error {
-                            name: "agent".to_string(),
-                            message: e.to_string(),
-                        };
-                        app.finish_streaming();
-                        break;
-                    }
-                    None => {
-                        // 스트림 종료
-                        if let Some(last_msg) = app.messages.last() {
-                            if last_msg.is_streaming {
-                                let assistant_msg = Message::assistant().with_text(&last_msg.content);
-                                session.messages.push(assistant_msg);
-                            }
-                        }
-                        app.finish_streaming();
-                        app.tool_status = super::tui::ToolStatus::None;
-                        break;
+        match stream_result {
+            Some(Ok(AgentEvent::Message(message))) => {
+                // 텍스트 추출 및 대화창에 추가
+                let text = extract_text_content(&message);
+                if let Some(last_msg) = app.messages.last_mut() {
+                    if last_msg.is_streaming && !text.is_empty() {
+                        last_msg.content.push_str(&text);
                     }
                 }
+
+                // 도구 관련 콘텐츠 처리
+                for content in &message.content {
+                    match content {
+                        MessageContent::ToolRequest(req) => {
+                            app.push_tool_text(&format!("▶ {}", req.to_readable_string()));
+                            app.start_tool(req.to_readable_string().split('(').next().unwrap_or("tool").to_string());
+                        }
+                        MessageContent::ToolResponse(res) => {
+                            let output = match &res.tool_result {
+                                Ok(result) => {
+                                    result.content.iter()
+                                        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                }
+                                Err(e) => format!("Error: {}", e.message),
+                            };
+                            // SUMMARY만 추출 (상세 목록 제외)
+                            let summary = extract_tool_summary(&output);
+                            app.push_tool_text(&format!("✓ {}", summary));
+                            app.finish_tool();
+                        }
+                        MessageContent::ActionRequired(action) => {
+                            // 도구 승인 요청 처리 (TUI에서는 자동 승인)
+                            if let ActionRequiredData::ToolConfirmation { id, tool_name, .. } = &action.data {
+                                tracing::info!("TUI: 도구 승인 요청 - {} (자동 승인)", tool_name);
+                                app.push_tool_text(&format!("🔓 {} 승인됨", tool_name));
+
+                                // 자동 승인 전송
+                                session.agent.handle_confirmation(
+                                    id.clone(),
+                                    PermissionConfirmation {
+                                        principal_type: PrincipalType::Tool,
+                                        permission: Permission::AllowOnce,
+                                    },
+                                ).await;
+                            }
+                        }
+                        _ => {} // Text 등 다른 타입은 무시
+                    }
+                }
+
+                app.tool_status = super::tui::ToolStatus::None;
             }
-            // 짧은 대기 (이벤트 처리 기회 제공)
-            _ = tokio::time::sleep(Duration::from_millis(16)) => {
-                // 다음 루프에서 이벤트 처리
+            Some(Ok(AgentEvent::McpNotification((ext_id, notification)))) => {
+                // MCP 알림에서 도구 정보 추출
+                handle_mcp_notification(&ext_id, &notification, app);
+            }
+            Some(Ok(AgentEvent::HistoryReplaced(updated_conversation))) => {
+                session.messages = updated_conversation;
+            }
+            Some(Ok(AgentEvent::ModelChange { model, mode: _ })) => {
+                app.model_name = model;
+            }
+            Some(Err(e)) => {
+                app.tool_status = super::tui::ToolStatus::Error {
+                    name: "agent".to_string(),
+                    message: e.to_string(),
+                };
+                app.finish_streaming();
+                break;
+            }
+            None => {
+                // 스트림 종료 - 마지막 메시지 언마스킹
+                if let Some(last_msg) = app.messages.last_mut() {
+                    if last_msg.is_streaming {
+                        let unmasked_content = session.agent.unmask_pii(&last_msg.content).await;
+                        if unmasked_content != last_msg.content {
+                            tracing::debug!("TUI: PII 언마스킹 적용됨");
+                            last_msg.content = unmasked_content.clone();
+                        }
+                        let assistant_msg = Message::assistant().with_text(&last_msg.content);
+                        session.messages.push(assistant_msg);
+                    }
+                }
+                app.finish_streaming();
+                app.tool_status = super::tui::ToolStatus::None;
+                break;
             }
         }
     }

@@ -9,6 +9,7 @@ use tracing::debug;
 
 use super::super::agents::Agent;
 use crate::agents::platform_extensions::code_execution;
+use crate::config::Config;
 use crate::conversation::message::{Message, MessageContent, ToolRequest};
 use crate::conversation::Conversation;
 #[cfg(test)]
@@ -20,6 +21,34 @@ use crate::providers::toolshim::{
     modify_system_prompt_for_tool_json, OllamaInterpreter,
 };
 use rmcp::model::Tool;
+
+/// PII 마스킹 시스템 프롬프트 설명
+/// LLM에게 민감정보가 마스킹되어 전달됨을 알려줌
+const PII_MASKING_INSTRUCTION: &str = r#"## Sensitive Information Protection (PII Masking)
+
+이 시스템은 보안을 위해 사용자의 민감 정보를 자동으로 보호합니다.
+
+### 동작 방식
+1. **마스킹 (사용자→AI)**: 비밀번호, API 키 등 → [SECRET_1], [TOKEN_1] 형태로 변환
+2. **언마스킹 (AI→사용자)**: 당신 응답의 [SECRET_1] → 원본 값으로 자동 복원
+
+### 당신이 알아야 할 것
+- 당신에게는 `[SECRET_1]` 같은 토큰만 보입니다. 실제 값은 알 수 없습니다
+- 응답에 토큰을 그대로 사용하면, 사용자 화면에서 원본으로 표시됩니다
+- 사용자는 자신의 민감정보가 AI에게 그대로 전달되지 않아 안전합니다
+
+### 사용자가 물어볼 때 설명하는 법
+사용자가 "왜 [SECRET_1]이라고 보이냐?" 또는 "마스킹이 뭐냐?" 물으면:
+> "보안을 위해 비밀번호나 API 키 같은 민감정보가 [SECRET_1] 형태로 마스킹되어 저에게 전달됩니다. 저는 실제 값을 볼 수 없지만, 제 응답에 토큰을 사용하면 귀하의 화면에서는 원본 값으로 정상 표시됩니다."
+
+### 절대 하지 말 것
+1. 실제 값 추측 금지 (예: "비밀번호가 abc123인데..." - 거짓말)
+2. 변환 예시 금지 (예: "mysecretpassword가 [SECRET_1]로 바뀝니다" - 원본을 모름)
+3. 내용 단정 금지 (예: "[SECRET_1]에 특수문자가 없네요" - 내용을 모름)
+
+### 좋은 응답 예시
+- "입력하신 비밀번호([SECRET_1])로 로그인을 시도해보세요"
+- "저는 마스킹된 토큰만 보여서 실제 비밀번호 내용은 확인할 수 없습니다""#;
 
 async fn enhance_model_error(error: ProviderError, provider: &Arc<dyn Provider>) -> ProviderError {
     let ProviderError::RequestFailed(ref msg) = error else {
@@ -177,7 +206,19 @@ impl Agent {
         let provider = self.provider().await?;
         let model_config = provider.get_model_config();
 
-        let prompt_manager = self.prompt_manager.lock().await;
+        // PII 마스킹 활성화 시 시스템 프롬프트에 토큰 설명 추가
+        let pii_masking_enabled = Config::global()
+            .get_param::<bool>("PII_MASKING_ENABLED")
+            .unwrap_or(true);  // 기본값: 활성화
+
+        let mut prompt_manager = self.prompt_manager.lock().await;
+        if pii_masking_enabled {
+            prompt_manager.add_system_prompt_extra(
+                "pii_masking".to_string(),
+                PII_MASKING_INSTRUCTION.to_string(),
+            );
+        }
+
         let mut system_prompt = prompt_manager
             .builder()
             .with_environment()  // 환경 정보 자동 감지

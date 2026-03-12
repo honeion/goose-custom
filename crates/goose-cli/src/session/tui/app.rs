@@ -275,6 +275,11 @@ pub struct TuiApp<'a> {
     pub input_history: Vec<String>,
     pub history_index: Option<usize>,
     pub history_temp: String, // 히스토리 탐색 중 임시 저장
+    pub just_pasted: bool,    // 붙여넣기 직후 Enter 무시용
+
+    // 붙여넣기 감지 (빠른 입력 감지)
+    pub last_char_time: Instant,
+    pub rapid_input_count: usize, // 연속 빠른 입력 카운트
 
     // 상태
     pub tool_status: ToolStatus,
@@ -291,6 +296,8 @@ pub struct TuiApp<'a> {
     pub show_help: bool,
     pub debug_mode: bool,
     pub mouse_capture: bool, // 마우스 캡처 상태 (F2로 토글)
+    pub pii_masking_enabled: bool, // PII 마스킹 활성화 상태
+    pub pii_masked_count: usize, // 현재 세션에서 마스킹된 항목 수
 
     // 애니메이션
     pub spinner: SpinnerFrames,
@@ -321,6 +328,10 @@ impl<'a> TuiApp<'a> {
             input_history: Vec::new(),
             history_index: None,
             history_temp: String::new(),
+            just_pasted: false,
+
+            last_char_time: Instant::now(),
+            rapid_input_count: 0,
 
             tool_status: ToolStatus::None,
             scroll_state: ScrollState::default(),
@@ -334,6 +345,8 @@ impl<'a> TuiApp<'a> {
             show_help: false,
             debug_mode: false,
             mouse_capture: true, // 기본: 마우스 캡처 ON (휠 스크롤 가능)
+            pii_masking_enabled: false, // tui_session에서 설정
+            pii_masked_count: 0,
 
             spinner: SpinnerFrames::new(),
             last_tick: Instant::now(),

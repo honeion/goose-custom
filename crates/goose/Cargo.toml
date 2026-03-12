@@ -84,17 +84,6 @@ sqlx = { version = "0.8", default-features = false, features = [
     "migrate",
 ] }
 
-# For Bedrock provider
-aws-config = { version = "=1.8.12", features = ["behavior-version-latest"] }
-aws-smithy-types = "=1.3.5"
-aws-sdk-bedrockruntime = "=1.120.0"
-
-# For SageMaker TGI provider
-aws-sdk-sagemakerruntime = "1.62.0"
-
-# For GCP Vertex AI provider auth
-jsonwebtoken = { version = "10.3.0", features = ["aws_lc_rs"] }
-
 blake3 = "1.5"
 fs2 = { workspace = true }
 tokio-stream = { workspace = true }
@@ -158,11 +147,6 @@ goose-test-support = { path = "../goose-test-support" }
 [[example]]
 name = "agent"
 path = "examples/agent.rs"
-
-[[example]]
-name = "databricks_oauth"
-path = "examples/databricks_oauth.rs"
-
 
 [[bin]]
 name = "build_canonical_models"

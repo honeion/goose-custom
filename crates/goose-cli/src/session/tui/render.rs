@@ -418,8 +418,26 @@ impl<'a> TuiApp<'a> {
 
         let token_text = format!(" {} ", self.token_usage.display());
 
+        // PII 마스킹 상태 표시
+        let pii_text = if self.pii_masking_enabled {
+            if self.pii_masked_count > 0 {
+                format!("🔒PII:{}", self.pii_masked_count)
+            } else {
+                "🔒PII".to_string()
+            }
+        } else {
+            "🔓".to_string()
+        };
+        let pii_style = if self.pii_masking_enabled {
+            self.theme.success
+        } else {
+            self.theme.muted
+        };
+
         let status_line = Line::from(vec![
             mode_span,
+            Span::styled(" │ ", self.theme.border),
+            Span::styled(pii_text, pii_style),
             Span::styled(" │ ", self.theme.border),
             Span::styled("Tokens:", self.theme.dimmed),
             Span::styled(token_text, token_style),
@@ -474,7 +492,8 @@ impl<'a> TuiApp<'a> {
             Line::styled(" ─────────────────────────────", self.theme.border),
             Line::raw(" Enter       메시지 전송"),
             Line::raw(" Shift+Enter 새 줄 입력"),
-            Line::raw(" ↑/↓         명령어 히스토리"),
+            Line::raw(" Ctrl+P/N    명령어 히스토리 (이전/다음)"),
+            Line::raw(" Ctrl+V      붙여넣기 (멀티라인 지원)"),
             Line::raw(" Tab         패널 포커스 전환"),
             Line::raw(""),
             Line::styled(" 기능키", self.theme.header),

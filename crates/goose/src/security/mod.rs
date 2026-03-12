@@ -1,5 +1,7 @@
 pub mod classification_client;
 pub mod patterns;
+pub mod pii_masker;
+pub mod pii_patterns;
 pub mod scanner;
 pub mod security_inspector;
 

@@ -63,10 +63,11 @@ anstream = "0.6.18"
 
 # Ratatui TUI (Phase 5)
 ratatui = { version = "0.28", default-features = false, features = ["crossterm"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
 tui-textarea = "0.6"
 tui-scrollview = "0.4"
 # tachyonfx = "0.7"  # 비활성화 - 깜빡거림 이슈
+arboard = "3.4"  # 클립보드 접근 (Ctrl+V 지원)
 open = "5.3.2"
 url = { workspace = true }
 urlencoding = { workspace = true }
