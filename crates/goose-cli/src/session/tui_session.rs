@@ -528,9 +528,13 @@ fn handle_hints_command(cmd: &str, app: &mut TuiApp) {
             lines.push(format!("  👤 Local: {}", cwd.join(GOOSE_HINTS_LOCAL_FILENAME).display()));
             app.add_system_message(lines.join("\n"));
         }
+        "panel" | "p" => {
+            // TUI 편집 패널 열기 (F5 대안)
+            app.hints_panel.open(&cwd);
+        }
         _ => {
             app.add_system_message(format!(
-                "❓ 알 수 없는 hints 서브명령어: {}\n\n사용법:\n  /hints [show]     - 로드된 hints 표시\n  /hints reload     - hints 다시 로드\n  /hints add <g|p|l> - hints 파일 생성\n  /hints edit <g|p|l> - hints 편집\n  /hints path       - 경로 정보",
+                "❓ 알 수 없는 hints 서브명령어: {}\n\n사용법:\n  /hints [show]     - 로드된 hints 표시\n  /hints reload     - hints 다시 로드\n  /hints add <g|p|l> - hints 파일 생성\n  /hints edit <g|p|l> - hints 편집\n  /hints path       - 경로 정보\n  /hints panel      - 편집 패널 열기 (F5)",
                 subcmd
             ));
         }

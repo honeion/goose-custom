@@ -465,7 +465,7 @@ impl<'a> TuiApp<'a> {
                 format!("🎨{}", self.theme_name.label()),
                 self.theme.info
             ),
-            Span::styled(" F1:? F2:🖱️ F3:📋 F4:🎨", self.theme.dimmed),
+            Span::styled(" F1:? F2:🖱️ F3:📋 F4:🎨 F5:📝", self.theme.dimmed),
         ]);
 
         let paragraph = Paragraph::new(status_line)
@@ -510,6 +510,8 @@ impl<'a> TuiApp<'a> {
             Line::raw(" F1           도움말 (이 창)"),
             Line::raw(" F2           마우스 캡처 토글"),
             Line::raw(" F3           도구 출력 패널 토글"),
+            Line::raw(" F4           테마 변경"),
+            Line::raw(" F5           Hints 편집 패널"),
             Line::raw(""),
             Line::styled(" 마우스", self.theme.header),
             Line::styled(" ─────────────────────────────", self.theme.border),
