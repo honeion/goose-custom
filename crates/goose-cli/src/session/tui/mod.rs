@@ -6,6 +6,7 @@
 pub mod animation;
 pub mod app;
 pub mod events;
+pub mod hints_panel;
 pub mod markdown;
 pub mod offscreen_buffer;
 pub mod render;

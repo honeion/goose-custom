@@ -56,6 +56,8 @@ pub enum Action {
     HistoryPrev,
     /// 히스토리 다음 (↓)
     HistoryNext,
+    /// Hints 편집 패널 토글 (F5)
+    ToggleHintsPanel,
 }
 
 /// 업데이트 결과
@@ -236,6 +238,12 @@ impl<'a> TuiApp<'a> {
                 // 리사이즈는 렌더링 시 자동 처리
                 UpdateResult::Continue
             }
+
+            Action::ToggleHintsPanel => {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                self.hints_panel.toggle(&cwd);
+                UpdateResult::Continue
+            }
         }
     }
 
@@ -244,6 +252,17 @@ impl<'a> TuiApp<'a> {
         // Windows에서 Press만 처리
         #[cfg(target_os = "windows")]
         if key.kind != KeyEventKind::Press {
+            return None;
+        }
+
+        // Hints 패널이 열려있을 때 - F5 또는 패널 내부 키 처리
+        if self.hints_panel.visible {
+            // F5로 닫기
+            if key.code == KeyCode::F(5) {
+                return Some(Action::ToggleHintsPanel);
+            }
+            // 패널 내부 키 처리 (이벤트 소비됨)
+            self.hints_panel.handle_key(key);
             return None;
         }
 
@@ -413,6 +432,9 @@ impl<'a> TuiApp<'a> {
             // 테마 토글
             (KeyCode::F(4), _) => Some(Action::ToggleTheme),
 
+            // Hints 패널 토글
+            (KeyCode::F(5), _) => Some(Action::ToggleHintsPanel),
+
             // 기본 입력은 TextArea가 처리
             _ => {
                 self.input.input(key);
@@ -460,6 +482,7 @@ impl<'a> TuiApp<'a> {
             KeyCode::F(2) => Some(Action::ToggleMouseCapture),
             KeyCode::F(3) => Some(Action::ToggleToolPanel),
             KeyCode::F(4) => Some(Action::ToggleTheme),
+            KeyCode::F(5) => Some(Action::ToggleHintsPanel),
 
             _ => None,
         }

@@ -11,6 +11,10 @@ use futures::StreamExt;
 use goose::agents::AgentEvent;
 use goose::config::Config;
 use goose::conversation::message::{ActionRequiredData, Message, MessageContent};
+use goose::hints::{
+    get_hints_metadata, format_hints_summary,
+    GOOSE_HINTS_FILENAME, GOOSE_HINTS_LOCAL_FILENAME, AGENTS_MD_FILENAME,
+};
 use goose::permission::permission_confirmation::PrincipalType;
 use goose::permission::{Permission, PermissionConfirmation};
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -75,6 +79,19 @@ async fn run_tui_loop(
         "Goose Custom TUI 세션이 시작되었습니다.".to_string()
     };
     app.add_system_message(welcome_msg);
+
+    // Hints 요약 표시
+    let hints_filenames = vec![
+        GOOSE_HINTS_FILENAME.to_string(),
+        GOOSE_HINTS_LOCAL_FILENAME.to_string(),
+        AGENTS_MD_FILENAME.to_string(),
+    ];
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let hints_metadata = get_hints_metadata(&cwd, &hints_filenames);
+    if !hints_metadata.is_empty() {
+        let hints_summary = format_hints_summary(&hints_metadata);
+        app.add_system_message(hints_summary);
+    }
 
     // 기존 메시지 히스토리 로드
     for msg in &session.messages {
@@ -379,8 +396,143 @@ fn handle_slash_command(cmd: &str, app: &mut TuiApp) {
             app.toggle_theme();
             app.add_system_message(format!("테마 변경: {}", app.theme_name.label()));
         }
+        _ if cmd.starts_with("/hints") => {
+            handle_hints_command(cmd, app);
+        }
         _ => {
-            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme)", cmd));
+            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme) /hints", cmd));
+        }
+    }
+}
+
+/// /hints 명령어 처리
+fn handle_hints_command(cmd: &str, app: &mut TuiApp) {
+    use goose::config::paths::Paths;
+
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    let subcmd = parts.get(1).map(|s| *s).unwrap_or("show");
+
+    let hints_filenames = vec![
+        GOOSE_HINTS_FILENAME.to_string(),
+        GOOSE_HINTS_LOCAL_FILENAME.to_string(),
+        AGENTS_MD_FILENAME.to_string(),
+    ];
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    match subcmd {
+        "show" | "list" => {
+            // 현재 로드된 hints 표시
+            let metadata = get_hints_metadata(&cwd, &hints_filenames);
+            if metadata.is_empty() {
+                app.add_system_message("📋 로드된 Hints가 없습니다.\n\n생성하려면:\n  /hints add global  - 글로벌 hints\n  /hints add project - 프로젝트 hints\n  /hints add local   - 로컬 hints".to_string());
+            } else {
+                let mut lines = vec!["📋 로드된 Hints:".to_string(), "".to_string()];
+                for hint in &metadata {
+                    lines.push(format!(
+                        "  {} {} - {} ({}줄)",
+                        hint.layer.icon(),
+                        hint.layer.label(),
+                        hint.file_path.display(),
+                        hint.line_count
+                    ));
+                }
+                lines.push("".to_string());
+                lines.push("명령어: /hints edit <layer> | /hints add <layer> | /hints reload".to_string());
+                app.add_system_message(lines.join("\n"));
+            }
+        }
+        "reload" => {
+            // hints 다시 로드
+            let metadata = get_hints_metadata(&cwd, &hints_filenames);
+            let summary = format_hints_summary(&metadata);
+            if summary.is_empty() {
+                app.add_system_message("🔄 Hints 리로드 완료 (로드된 파일 없음)".to_string());
+            } else {
+                app.add_system_message(format!("🔄 Hints 리로드 완료\n{}", summary));
+            }
+        }
+        "add" => {
+            let layer = parts.get(2).map(|s| *s).unwrap_or("project");
+            let (path, layer_name) = match layer {
+                "global" | "g" => {
+                    let path = Paths::in_config_dir(GOOSE_HINTS_FILENAME);
+                    (path, "Global")
+                }
+                "local" | "l" => {
+                    let path = cwd.join(GOOSE_HINTS_LOCAL_FILENAME);
+                    (path, "Local")
+                }
+                _ => {
+                    let path = cwd.join(GOOSE_HINTS_FILENAME);
+                    (path, "Project")
+                }
+            };
+
+            if path.exists() {
+                app.add_system_message(format!(
+                    "⚠️ {} hints 파일이 이미 존재합니다:\n  {}\n\n편집하려면: /hints edit {}",
+                    layer_name, path.display(), layer
+                ));
+            } else {
+                // 기본 템플릿으로 파일 생성
+                let template = format!(
+                    "# {} Hints for Goose\n\n## Project Context\n\n[프로젝트 설명]\n\n## Instructions\n\n[AI에게 주는 지시사항]\n",
+                    layer_name
+                );
+                match std::fs::write(&path, &template) {
+                    Ok(_) => {
+                        app.add_system_message(format!(
+                            "✅ {} hints 파일 생성됨:\n  {}\n\n편집하려면: /hints edit {}",
+                            layer_name, path.display(), layer
+                        ));
+                    }
+                    Err(e) => {
+                        app.add_system_message(format!("❌ 파일 생성 실패: {}", e));
+                    }
+                }
+            }
+        }
+        "edit" => {
+            let layer = parts.get(2).map(|s| *s).unwrap_or("project");
+            let path = match layer {
+                "global" | "g" => Paths::in_config_dir(GOOSE_HINTS_FILENAME),
+                "local" | "l" => cwd.join(GOOSE_HINTS_LOCAL_FILENAME),
+                _ => cwd.join(GOOSE_HINTS_FILENAME),
+            };
+
+            if !path.exists() {
+                app.add_system_message(format!(
+                    "⚠️ 파일이 존재하지 않습니다: {}\n\n생성하려면: /hints add {}",
+                    path.display(), layer
+                ));
+            } else {
+                // 에디터로 파일 열기
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                    if cfg!(windows) { "notepad".to_string() } else { "vi".to_string() }
+                });
+                app.add_system_message(format!(
+                    "📝 에디터로 여는 중: {}\n  {}\n\n(외부 에디터에서 편집 후 /hints reload 실행)",
+                    editor, path.display()
+                ));
+                // 백그라운드에서 에디터 실행 (blocking하지 않음)
+                let _ = std::process::Command::new(&editor)
+                    .arg(&path)
+                    .spawn();
+            }
+        }
+        "path" => {
+            // hints 경로 정보 표시
+            let mut lines = vec!["📂 Hints 경로 정보:".to_string(), "".to_string()];
+            lines.push(format!("  🌐 Global: {}", Paths::in_config_dir(GOOSE_HINTS_FILENAME).display()));
+            lines.push(format!("  📁 Project: {}", cwd.join(GOOSE_HINTS_FILENAME).display()));
+            lines.push(format!("  👤 Local: {}", cwd.join(GOOSE_HINTS_LOCAL_FILENAME).display()));
+            app.add_system_message(lines.join("\n"));
+        }
+        _ => {
+            app.add_system_message(format!(
+                "❓ 알 수 없는 hints 서브명령어: {}\n\n사용법:\n  /hints [show]     - 로드된 hints 표시\n  /hints reload     - hints 다시 로드\n  /hints add <g|p|l> - hints 파일 생성\n  /hints edit <g|p|l> - hints 편집\n  /hints path       - 경로 정보",
+                subcmd
+            ));
         }
     }
 }

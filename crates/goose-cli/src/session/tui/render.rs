@@ -72,6 +72,15 @@ impl<'a> TuiApp<'a> {
             self.render_help_popup(frame, area);
         }
 
+        // Hints 편집 패널 (최상위, 도움말보다 위)
+        if self.hints_panel.visible {
+            // 화면 중앙에 80% 크기로 표시
+            let width = (area.width * 80 / 100).max(60);
+            let height = (area.height * 80 / 100).max(20);
+            let panel_area = centered_rect(width, height, area);
+            self.hints_panel.render(frame, panel_area);
+        }
+
         // TachyonFX 효과 - 비활성화 (깜빡거림 이슈)
         // if self.message_effect.is_some() {
         //     self.set_effect_area(conversation_area);

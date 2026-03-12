@@ -1,6 +1,7 @@
 use ignore::gitignore::Gitignore;
 use std::{
     collections::HashSet,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -10,6 +11,139 @@ use crate::hints::import_files::read_referenced_files;
 pub const GOOSE_HINTS_FILENAME: &str = ".goosehints";
 pub const GOOSE_HINTS_LOCAL_FILENAME: &str = ".goosehints.local";
 pub const AGENTS_MD_FILENAME: &str = "AGENTS.md";
+
+/// 힌트 레이어 종류
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HintLayer {
+    Global,
+    Project,
+    Local,
+}
+
+impl HintLayer {
+    pub fn icon(&self) -> &'static str {
+        match self {
+            HintLayer::Global => "🌐",
+            HintLayer::Project => "📁",
+            HintLayer::Local => "👤",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            HintLayer::Global => "Global",
+            HintLayer::Project => "Project",
+            HintLayer::Local => "Local",
+        }
+    }
+}
+
+/// 로드된 힌트 파일의 메타데이터
+#[derive(Debug, Clone)]
+pub struct HintMetadata {
+    pub layer: HintLayer,
+    pub file_path: PathBuf,
+    pub file_name: String,
+    pub line_count: usize,
+    pub project_name: Option<String>,
+}
+
+impl HintMetadata {
+    /// 한 줄 요약 생성
+    pub fn summary(&self) -> String {
+        let project_info = self.project_name.as_ref()
+            .map(|p| format!(" ({})", p))
+            .unwrap_or_default();
+        format!(
+            "{} {} {}줄{}",
+            self.layer.icon(),
+            self.file_name,
+            self.line_count,
+            project_info
+        )
+    }
+}
+
+/// 로드된 힌트 메타데이터 수집 (세션 시작 시 표시용)
+pub fn get_hints_metadata(cwd: &Path, hints_filenames: &[String]) -> Vec<HintMetadata> {
+    let mut metadata = Vec::new();
+
+    // 글로벌 힌트
+    for hints_filename in hints_filenames {
+        let global_hints_path = Paths::in_config_dir(hints_filename);
+        if global_hints_path.is_file() {
+            if let Ok(content) = fs::read_to_string(&global_hints_path) {
+                metadata.push(HintMetadata {
+                    layer: HintLayer::Global,
+                    file_path: global_hints_path.clone(),
+                    file_name: hints_filename.clone(),
+                    line_count: content.lines().count(),
+                    project_name: None,
+                });
+            }
+        }
+    }
+
+    // 프로젝트/로컬 힌트
+    let git_root = find_git_root(cwd);
+    let local_directories = get_local_directories(git_root, cwd);
+    let project_name = git_root
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(String::from);
+
+    for directory in &local_directories {
+        for hints_filename in hints_filenames {
+            let hints_path = directory.join(hints_filename);
+            if hints_path.is_file() {
+                if let Ok(content) = fs::read_to_string(&hints_path) {
+                    let layer = if hints_filename.contains("local") || hints_filename.ends_with(".local") {
+                        HintLayer::Local
+                    } else {
+                        HintLayer::Project
+                    };
+
+                    metadata.push(HintMetadata {
+                        layer,
+                        file_path: hints_path,
+                        file_name: hints_filename.clone(),
+                        line_count: content.lines().count(),
+                        project_name: project_name.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    metadata
+}
+
+/// 힌트 메타데이터를 포맷팅된 문자열로 변환
+pub fn format_hints_summary(metadata: &[HintMetadata]) -> String {
+    if metadata.is_empty() {
+        return String::new();
+    }
+
+    let mut lines = vec!["📋 Hints 로드됨:".to_string()];
+    let last_idx = metadata.len() - 1;
+
+    for (i, hint) in metadata.iter().enumerate() {
+        let prefix = if i == last_idx { "└─" } else { "├─" };
+        let project_info = hint.project_name.as_ref()
+            .map(|p| format!(" ({})", p))
+            .unwrap_or_default();
+        lines.push(format!(
+            "{}  {} {} ({}줄){}",
+            prefix,
+            hint.layer.icon(),
+            hint.file_name,
+            hint.line_count,
+            project_info
+        ));
+    }
+
+    lines.join("\n")
+}
 
 fn find_git_root(start_dir: &Path) -> Option<&Path> {
     let mut check_dir = start_dir;

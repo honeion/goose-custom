@@ -13,6 +13,7 @@ use rmcp::model::Role;
 use tui_textarea::TextArea;
 
 use super::animation::SpinnerFrames;
+use super::hints_panel::HintsPanel;
 use super::markdown::{DiffStyles, is_diff_preview, parse_diff};
 use super::offscreen_buffer::{PanelId, PanelManager};
 use super::theme::Theme;
@@ -303,6 +304,9 @@ pub struct TuiApp<'a> {
     pub spinner: SpinnerFrames,
     pub last_tick: Instant,
 
+    // Hints 편집 패널 (F5)
+    pub hints_panel: HintsPanel<'a>,
+
     // TachyonFX 효과 - 비활성화 (깜빡거림 이슈)
     // pub message_effect: Option<Effect>,
     // pub effect_area: Option<Rect>,
@@ -350,6 +354,8 @@ impl<'a> TuiApp<'a> {
 
             spinner: SpinnerFrames::new(),
             last_tick: Instant::now(),
+
+            hints_panel: HintsPanel::new(),
 
             // TachyonFX 비활성화
             // message_effect: None,

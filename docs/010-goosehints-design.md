@@ -1,6 +1,6 @@
 ---
 title: Goosehints 시스템 설계
-status: planning
+status: completed
 created: 2026-03-12
 updated: 2026-03-12
 author: claude
@@ -31,9 +31,9 @@ CLAUDE.md처럼 프로젝트별 지침 파일을 지원하는 시스템.
 | 프로젝트 힌트 | `.goosehints`, `.goosehints.local` | ✅ 완료 |
 | @import 구문 | `hints/import_files.rs` | ✅ 완료 |
 | 프롬프트 빌더 | `prompt_manager.rs` | ✅ 완료 |
-| **로드 시각화** | - | 🔲 미구현 |
-| **/hints 명령어** | - | 🔲 미구현 |
-| **TUI 편집 패널** | - | 🔲 미구현 |
+| **로드 시각화** | `tui_session.rs` | ✅ 완료 |
+| **/hints 명령어** | `tui_session.rs` | ✅ 완료 |
+| **TUI 편집 패널** | `tui/hints_panel.rs` | ✅ 완료 |
 
 ---
 
