@@ -9,6 +9,7 @@ use anyhow::Result;
 use crossterm::event;
 use futures::StreamExt;
 use goose::agents::AgentEvent;
+use goose::audit::{AuditConfig, AuditLogger};
 use goose::config::Config;
 use goose::conversation::message::{ActionRequiredData, Message, MessageContent};
 use goose::hints::{
@@ -66,6 +67,29 @@ async fn run_tui_loop(
     let model = std::env::var("GOOSE_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
     let model_name = format!("{} {}", provider, model);
     let mut app = TuiApp::new(session.session_id.clone(), model_name);
+
+    // 감사 로거 초기화
+    let audit_config = AuditConfig {
+        enabled: Config::global()
+            .get_param::<bool>("AUDIT_LOG_ENABLED")
+            .unwrap_or(true),
+        retention_days: Config::global()
+            .get_param::<u32>("AUDIT_RETENTION_DAYS")
+            .unwrap_or(30),
+        ..AuditConfig::default()
+    };
+
+    if let Err(e) = AuditLogger::init(audit_config) {
+        tracing::warn!("감사 로거 초기화 실패: {}", e);
+    } else {
+        // 세션 시작 이벤트 기록
+        if let Some(logger) = AuditLogger::global() {
+            let cwd = std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            logger.log_session_start(&session.session_id, &cwd);
+        }
+    }
 
     // PII 마스킹 상태 설정 (기본: 활성화)
     app.pii_masking_enabled = Config::global()
@@ -166,6 +190,11 @@ async fn run_tui_loop(
 
         // 틱 업데이트
         app.update(Action::Tick);
+    }
+
+    // 세션 종료 이벤트 기록
+    if let Some(logger) = AuditLogger::global() {
+        logger.log_session_end(&session.session_id);
     }
 
     Ok(())
@@ -399,8 +428,88 @@ fn handle_slash_command(cmd: &str, app: &mut TuiApp) {
         _ if cmd.starts_with("/hints") => {
             handle_hints_command(cmd, app);
         }
+        _ if cmd.starts_with("/audit") => {
+            handle_audit_command(cmd, app);
+        }
         _ => {
-            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme) /hints", cmd));
+            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme) /hints /audit", cmd));
+        }
+    }
+}
+
+/// /audit 명령어 처리
+fn handle_audit_command(cmd: &str, app: &mut TuiApp) {
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    let subcmd = parts.get(1).map(|s| *s).unwrap_or("status");
+
+    match subcmd {
+        "status" | "s" => {
+            // 현재 세션 감사 상태 표시
+            if let Some(logger) = AuditLogger::global() {
+                if let Some(stats) = logger.get_session_stats(&app.session_id) {
+                    let mut lines = vec![
+                        "📊 감사 로그 상태".to_string(),
+                        "".to_string(),
+                        format!("세션 ID: {}", app.session_id),
+                        format!("토큰 사용: {} (입력) / {} (출력)", stats.total_tokens.input, stats.total_tokens.output),
+                        format!("도구 호출: {}", stats.tool_calls),
+                        format!("PII 마스킹: {} 건", stats.pii_masked_count),
+                        format!("보안 이벤트: {} 건", stats.security_events),
+                    ];
+                    if stats.start_time.is_some() {
+                        lines.push(format!("실행 시간: {:?}", stats.start_time.unwrap().elapsed()));
+                    }
+                    app.add_system_message(lines.join("\n"));
+                } else {
+                    app.add_system_message("❌ 세션 통계를 찾을 수 없습니다.".to_string());
+                }
+            } else {
+                app.add_system_message("❌ 감사 로거가 초기화되지 않았습니다.".to_string());
+            }
+        }
+        "path" | "p" => {
+            // 감사 로그 파일 경로 표시
+            let log_dir = goose::config::paths::Paths::in_state_dir("logs").join("audit");
+            let today = chrono::Local::now().format("%Y-%m-%d");
+            let current_file = log_dir.join(format!("audit.{}.jsonl", today));
+
+            let mut lines = vec![
+                "📁 감사 로그 경로".to_string(),
+                "".to_string(),
+                format!("로그 디렉토리: {}", log_dir.display()),
+                format!("현재 파일: audit.{}.jsonl", today),
+            ];
+
+            if current_file.exists() {
+                if let Ok(metadata) = std::fs::metadata(&current_file) {
+                    lines.push(format!("파일 크기: {} bytes", metadata.len()));
+                }
+            } else {
+                lines.push("(파일 아직 없음)".to_string());
+            }
+
+            app.add_system_message(lines.join("\n"));
+        }
+        "help" | "?" => {
+            let help = vec![
+                "📝 감사 로그 명령어",
+                "",
+                "  /audit [status]  - 현재 세션 감사 상태",
+                "  /audit path      - 로그 파일 경로",
+                "  /audit help      - 이 도움말",
+                "",
+                "감사 로그는 모든 사용자 입력, PII 마스킹,",
+                "API 요청/응답, 도구 실행을 기록합니다.",
+                "",
+                "⚠️ 원본 PII 값은 절대 로그에 기록되지 않습니다.",
+            ];
+            app.add_system_message(help.join("\n"));
+        }
+        _ => {
+            app.add_system_message(format!(
+                "❓ 알 수 없는 audit 서브명령어: {}\n\n사용법:\n  /audit [status]  - 상태 표시\n  /audit path      - 경로 정보\n  /audit help      - 도움말",
+                subcmd
+            ));
         }
     }
 }

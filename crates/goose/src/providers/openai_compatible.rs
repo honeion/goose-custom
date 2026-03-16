@@ -3,6 +3,7 @@ use async_stream::try_stream;
 use futures::TryStreamExt;
 use reqwest::{Response, StatusCode};
 use serde_json::Value;
+use std::time::Instant;
 use tokio::pin;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LinesCodec};
@@ -13,6 +14,7 @@ use super::base::{MessageStream, Provider};
 use super::errors::ProviderError;
 use super::retry::ProviderRetry;
 use super::utils::{ImageFormat, RequestLog};
+use crate::audit::{AuditLogger, ApiRequestData, ApiResponseData, TokenUsage};
 use crate::conversation::message::Message;
 use crate::model::ModelConfig;
 use crate::providers::formats::openai::{create_request, response_to_streaming_message};
@@ -110,6 +112,34 @@ impl Provider for OpenAiCompatibleProvider {
         let payload = self.build_request(model_config, system, messages, tools, true)?;
         let mut log = RequestLog::start(model_config, &payload)?;
 
+        let request_start = Instant::now();
+
+        // 감사 로그: API 요청
+        if let Some(logger) = AuditLogger::global() {
+            let message_preview = messages
+                .last()
+                .map(|m| m.as_concat_text())
+                .unwrap_or_default();
+            let preview = if message_preview.len() > 200 {
+                format!("{}...", &message_preview[..200])
+            } else {
+                message_preview
+            };
+
+            let tool_names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+
+            logger.log_api_request(session_id, ApiRequestData {
+                provider: self.name.clone(),
+                model: model_config.model_name.clone(),
+                endpoint: Some(format!("{}chat/completions", self.completions_prefix)),
+                message_preview: preview,
+                tools: tool_names,
+                token_estimate: None,
+                pii_masked: true, // 이 시점에서는 이미 마스킹됨
+                masked_tokens: vec![],
+            });
+        }
+
         let completions_path = format!("{}chat/completions", self.completions_prefix);
         let response = self
             .with_retry(|| async {
@@ -124,7 +154,8 @@ impl Provider for OpenAiCompatibleProvider {
                 let _ = log.error(e);
             })?;
 
-        stream_openai_compat(response, log)
+        let latency_ms = request_start.elapsed().as_millis() as u64;
+        stream_openai_compat(response, log, session_id.to_string(), latency_ms)
     }
 }
 
@@ -236,6 +267,8 @@ pub async fn handle_response_openai_compat(response: Response) -> Result<Value, 
 pub fn stream_openai_compat(
     response: Response,
     mut log: RequestLog,
+    session_id: String,
+    latency_ms: u64,
 ) -> Result<MessageStream, ProviderError> {
     let stream = response.bytes_stream().map_err(std::io::Error::other);
 
@@ -246,12 +279,37 @@ pub fn stream_openai_compat(
 
         let message_stream = response_to_streaming_message(framed);
         pin!(message_stream);
+
+        let mut total_input_tokens = 0u64;
+        let mut total_output_tokens = 0u64;
+
         while let Some(message) = message_stream.next().await {
             let (message, usage) = message.map_err(|e|
                 ProviderError::RequestFailed(format!("Stream decode error: {}", e))
             )?;
+
+            // 토큰 사용량 누적
+            if let Some(ref u) = usage {
+                total_input_tokens = u.usage.input_tokens.unwrap_or(0) as u64;
+                total_output_tokens = u.usage.output_tokens.unwrap_or(0) as u64;
+            }
+
             log.write(&message, usage.as_ref().map(|f| f.usage).as_ref())?;
             yield (message, usage);
+        }
+
+        // 감사 로그: API 응답
+        if let Some(logger) = AuditLogger::global() {
+            logger.log_api_response(&session_id, ApiResponseData {
+                usage: TokenUsage {
+                    input: total_input_tokens,
+                    output: total_output_tokens,
+                },
+                latency_ms,
+                tool_calls: vec![], // 도구 호출은 별도 이벤트로 기록
+                response_preview: None,
+                error: None,
+            });
         }
     }))
 }

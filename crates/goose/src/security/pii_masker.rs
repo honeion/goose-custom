@@ -2,11 +2,17 @@
 //!
 //! LLM에 전송하기 전에 민감 정보를 마스킹하고,
 //! 응답에서 마스킹된 토큰을 원본으로 복원합니다.
+//!
+//! ## 감사 로그 연동
+//!
+//! 마스킹 결과를 감사 로그에 기록할 때는 `MaskedItem::to_audit_item()`을
+//! 사용하여 `MaskedPiiItem`으로 변환합니다. 원본 값은 절대 로그에 기록되지 않습니다.
 
 use regex::Regex;
 use std::collections::HashMap;
 
 use super::pii_patterns::{MaskType, PiiPattern, PII_PATTERNS};
+use crate::audit::event::{MaskedPiiItem, PiiPosition};
 
 /// 컴파일된 패턴
 struct CompiledPattern {
@@ -27,6 +33,25 @@ pub struct MaskedItem {
     pub pattern_name: String,
     /// 원본 값의 일부 (UI 표시용, 앞뒤 일부만)
     pub partial_original: String,
+    /// 원본 길이
+    pub original_length: usize,
+    /// 원본 텍스트 내 위치 (옵션)
+    pub position: Option<(usize, usize)>,
+}
+
+impl MaskedItem {
+    /// 감사 로그용 MaskedPiiItem으로 변환
+    ///
+    /// 원본 값은 포함하지 않고, 미리보기만 포함합니다.
+    pub fn to_audit_item(&self) -> MaskedPiiItem {
+        MaskedPiiItem {
+            token: self.token.clone(),
+            pii_type: self.pattern_name.clone(),
+            preview: self.partial_original.clone(),
+            length: self.original_length,
+            position: self.position.map(|(start, end)| PiiPosition { start, end }),
+        }
+    }
 }
 
 /// 마스킹 결과
@@ -38,6 +63,18 @@ pub struct MaskResult {
     pub masked_count: usize,
     /// 마스킹된 항목 목록 (UI 표시용)
     pub masked_items: Vec<MaskedItem>,
+}
+
+impl MaskResult {
+    /// 감사 로그용 MaskedPiiItem 목록으로 변환
+    pub fn to_audit_items(&self) -> Vec<MaskedPiiItem> {
+        self.masked_items.iter().map(|item| item.to_audit_item()).collect()
+    }
+
+    /// 마스킹된 토큰 목록 반환
+    pub fn masked_tokens(&self) -> Vec<String> {
+        self.masked_items.iter().map(|item| item.token.clone()).collect()
+    }
 }
 
 /// PII 마스커
@@ -166,6 +203,8 @@ impl PiiMasker {
                         mask_type,
                         pattern_name: pattern_name.clone(),
                         partial_original: Self::partial_mask(value),
+                        original_length: value.len(),
+                        position: Some((match_start, match_end)),
                     });
 
                     new_token

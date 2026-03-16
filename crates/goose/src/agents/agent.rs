@@ -15,6 +15,7 @@ use super::platform_tools;
 use super::tool_execution::{ToolCallResult, CHAT_MODE_TOOL_SKIPPED_RESPONSE, DECLINED_RESPONSE};
 use crate::action_required_manager::ActionRequiredManager;
 use crate::agents::extension::{ExtensionConfig, ExtensionResult, ToolInfo};
+use crate::audit::AuditLogger;
 use crate::agents::extension_manager::{
     get_parameter_names, ExtensionManager, ExtensionManagerCapabilities,
 };
@@ -317,11 +318,19 @@ impl Agent {
 
     /// Message의 텍스트 콘텐츠 마스킹
     pub async fn mask_message(&self, message: &Message) -> Message {
+        self.mask_message_with_info(message).await.0
+    }
+
+    /// Message의 텍스트 콘텐츠 마스킹 (마스킹 정보 포함)
+    ///
+    /// 반환값: (마스킹된 메시지, 마스킹 정보 목록)
+    pub async fn mask_message_with_info(&self, message: &Message) -> (Message, Vec<crate::security::pii_masker::MaskedItem>) {
         if !Self::is_pii_masking_enabled() {
-            return message.clone();
+            return (message.clone(), Vec::new());
         }
 
         let mut masked_content = Vec::new();
+        let mut all_masked_items = Vec::new();
         let mut masker = self.pii_masker.lock().await;
 
         for content in &message.content {
@@ -334,6 +343,7 @@ impl Agent {
                             "PII 마스킹: {} 개 항목",
                             result.masked_count
                         );
+                        all_masked_items.extend(result.masked_items);
                     }
                     masked_content.push(MessageContent::text(&result.masked_text));
                 }
@@ -342,10 +352,12 @@ impl Agent {
             }
         }
 
-        Message {
+        let masked_message = Message {
             content: masked_content,
             ..message.clone()
-        }
+        };
+
+        (masked_message, all_masked_items)
     }
 
     /// Message의 텍스트 콘텐츠 복원
@@ -694,6 +706,8 @@ impl Agent {
         }
 
         debug!("WAITING_TOOL_START: {}", tool_call.name);
+        let tool_start = std::time::Instant::now();
+
         let result: ToolCallResult = if self.is_frontend_tool(&tool_call.name).await {
             // For frontend tools, return an error indicating we need frontend execution
             ToolCallResult::from(Err(ErrorData::new(
@@ -712,6 +726,33 @@ impl Agent {
                     cancellation_token.unwrap_or_default(),
                 )
                 .await;
+
+            let execution_time_ms = tool_start.elapsed().as_millis() as u64;
+
+            // 감사 로그: 도구 실행
+            if let Some(logger) = AuditLogger::global() {
+                let args_masked: std::collections::HashMap<String, serde_json::Value> = tool_call
+                    .arguments
+                    .as_ref()
+                    .map(|args| args.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
+
+                let (result_status, result_preview) = match &result {
+                    Ok(_) => (crate::audit::ToolResultStatus::Success, None),
+                    Err(e) => (crate::audit::ToolResultStatus::Error, Some(e.to_string())),
+                };
+
+                logger.log_tool_execution(&session.id, crate::audit::ToolExecutionData {
+                    tool_name: tool_call.name.to_string(),
+                    args_masked,
+                    execution_time_ms,
+                    result_status,
+                    result_preview,
+                    result_length: None,
+                    security_check: None,
+                });
+            }
+
             result.unwrap_or_else(|e| {
                 crate::posthog::emit_error(
                     "tool_execution_failed",
@@ -1073,7 +1114,27 @@ impl Agent {
         let session_manager = self.config.session_manager.clone();
 
         // PII 마스킹: LLM에 전송할 메시지는 마스킹, UI 표시용은 원본 유지
-        let masked_user_message = self.mask_message(&user_message).await;
+        let (masked_user_message, masked_items) = self.mask_message_with_info(&user_message).await;
+
+        // 감사 로그: 사용자 입력 및 PII 마스킹 이벤트
+        if let Some(logger) = AuditLogger::global() {
+            let original_text = user_message.as_concat_text();
+            let masked_text = masked_user_message.as_concat_text();
+
+            // 사용자 입력 로그 (마스킹된 상태)
+            logger.log_user_input(
+                &session_config.id,
+                &masked_text,
+                original_text.len(),
+                masked_items.len(),
+            );
+
+            // PII 마스킹 이벤트 로그
+            if !masked_items.is_empty() {
+                let audit_items: Vec<_> = masked_items.iter().map(|item| item.to_audit_item()).collect();
+                logger.log_pii_masked(&session_config.id, audit_items);
+            }
+        }
 
         let message_text_for_trace = user_message.as_concat_text();
         tracing::Span::current().record("user_message", message_text_for_trace.as_str());
