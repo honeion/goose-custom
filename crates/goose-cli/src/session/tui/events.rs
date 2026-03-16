@@ -58,6 +58,8 @@ pub enum Action {
     HistoryNext,
     /// Hints 편집 패널 토글 (F5)
     ToggleHintsPanel,
+    /// 감사 로그 패널 토글 (F6)
+    ToggleAuditPanel,
 }
 
 /// 업데이트 결과
@@ -244,6 +246,11 @@ impl<'a> TuiApp<'a> {
                 self.hints_panel.toggle(&cwd);
                 UpdateResult::Continue
             }
+
+            Action::ToggleAuditPanel => {
+                self.audit_panel.toggle();
+                UpdateResult::Continue
+            }
         }
     }
 
@@ -263,6 +270,17 @@ impl<'a> TuiApp<'a> {
             }
             // 패널 내부 키 처리 (이벤트 소비됨)
             self.hints_panel.handle_key(key);
+            return None;
+        }
+
+        // 감사 로그 패널이 열려있을 때 - F6 또는 패널 내부 키 처리
+        if self.audit_panel.visible {
+            // F6으로 닫기
+            if key.code == KeyCode::F(6) {
+                return Some(Action::ToggleAuditPanel);
+            }
+            // 패널 내부 키 처리 (이벤트 소비됨)
+            self.audit_panel.handle_key(key);
             return None;
         }
 
@@ -435,6 +453,9 @@ impl<'a> TuiApp<'a> {
             // Hints 패널 토글
             (KeyCode::F(5), _) => Some(Action::ToggleHintsPanel),
 
+            // 감사 로그 패널 토글
+            (KeyCode::F(6), _) => Some(Action::ToggleAuditPanel),
+
             // 기본 입력은 TextArea가 처리
             _ => {
                 self.input.input(key);
@@ -483,6 +504,7 @@ impl<'a> TuiApp<'a> {
             KeyCode::F(3) => Some(Action::ToggleToolPanel),
             KeyCode::F(4) => Some(Action::ToggleTheme),
             KeyCode::F(5) => Some(Action::ToggleHintsPanel),
+            KeyCode::F(6) => Some(Action::ToggleAuditPanel),
 
             _ => None,
         }

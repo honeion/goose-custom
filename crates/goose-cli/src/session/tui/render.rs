@@ -81,6 +81,15 @@ impl<'a> TuiApp<'a> {
             self.hints_panel.render(frame, panel_area);
         }
 
+        // 감사 로그 패널 (최상위)
+        if self.audit_panel.visible {
+            // 화면 중앙에 80% 크기로 표시
+            let width = (area.width * 80 / 100).max(60);
+            let height = (area.height * 80 / 100).max(20);
+            let panel_area = centered_rect(width, height, area);
+            self.audit_panel.render(frame, panel_area);
+        }
+
         // TachyonFX 효과 - 비활성화 (깜빡거림 이슈)
         // if self.message_effect.is_some() {
         //     self.set_effect_area(conversation_area);
@@ -512,6 +521,7 @@ impl<'a> TuiApp<'a> {
             Line::raw(" F3           도구 출력 패널 토글"),
             Line::raw(" F4           테마 변경"),
             Line::raw(" F5           Hints 편집 패널"),
+            Line::raw(" F6           감사 로그 패널"),
             Line::raw(""),
             Line::styled(" 마우스", self.theme.header),
             Line::styled(" ─────────────────────────────", self.theme.border),
