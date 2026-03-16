@@ -132,6 +132,25 @@ $env:AZURE_OPENAI_DEPLOYMENT_NAME = "your-deployment"
 | Fuzzy Matching | ✅ 완료 | 유사 이름 검색 |
 | TUI 도구 승인 | ✅ 완료 | 자동 승인 처리 |
 
+### Phase 8: .goosehints 시스템 ✅ 완료 (2026-03-12)
+
+| 기능 | 상태 | 설명 |
+|------|------|------|
+| HintLayer/HintMetadata | ✅ 완료 | `hints/load_hints.rs` |
+| 로드 시각화 | ✅ 완료 | 세션 시작 시 hints 목록 표시 |
+| /hints 명령어 | ✅ 완료 | show/reload/add/edit/path/panel |
+| F5 편집 패널 | ✅ 완료 | `tui/hints_panel.rs` |
+| 도움말 업데이트 | ✅ 완료 | F1에 F4/F5 추가 |
+
+**파일 계층:**
+```
+~/.config/goose/.goosehints     (🌐 Global)
+{project}/.goosehints           (📁 Project, git 추적)
+{project}/.goosehints.local     (👤 Local, gitignore)
+```
+
+**설계 문서:** `010-goosehints-design.md`
+
 ### PII 마스킹 개요
 
 ```

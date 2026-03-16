@@ -10,6 +10,10 @@ use goose_mcp::{
     AutoVisualiserRouter, ComputerControllerServer, DeveloperServer, MemoryServer, TutorialServer,
 };
 
+use crate::commands::audit::{
+    handle_audit_path, handle_audit_pii, handle_audit_security, handle_audit_session,
+    handle_audit_summary, handle_audit_tokens,
+};
 use crate::commands::configure::{configure_telemetry_consent_dialog, handle_configure};
 use crate::commands::info::handle_info;
 use crate::commands::project::{handle_project_default, handle_projects_interactive};
@@ -617,6 +621,48 @@ enum SchedulerCommand {
 }
 
 #[derive(Subcommand)]
+enum AuditCommand {
+    /// Show audit log summary
+    #[command(about = "Show audit log summary")]
+    Summary {
+        #[arg(short, long, default_value = "7", help = "Number of days to include")]
+        days: u32,
+    },
+
+    /// Show session timeline
+    #[command(about = "Show session timeline")]
+    Session {
+        #[arg(help = "Session ID (partial match supported)")]
+        session_id: String,
+    },
+
+    /// Show daily token usage
+    #[command(about = "Show daily token usage")]
+    Tokens {
+        #[arg(short, long, default_value = "7", help = "Number of days to include")]
+        days: u32,
+    },
+
+    /// Show PII masking history
+    #[command(about = "Show PII masking history")]
+    Pii {
+        #[arg(short, long, default_value = "7", help = "Number of days to include")]
+        days: u32,
+    },
+
+    /// Show security events
+    #[command(about = "Show security events")]
+    Security {
+        #[arg(short, long, default_value = "7", help = "Number of days to include")]
+        days: u32,
+    },
+
+    /// Show audit log path
+    #[command(about = "Show audit log path")]
+    Path,
+}
+
+#[derive(Subcommand)]
 enum RecipeCommand {
     /// Validate a recipe file
     #[command(about = "Validate a recipe")]
@@ -800,6 +846,13 @@ enum Command {
     Recipe {
         #[command(subcommand)]
         command: RecipeCommand,
+    },
+
+    /// View and analyze audit logs
+    #[command(about = "View and analyze audit logs")]
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
     },
 
     /// Manage scheduled jobs
@@ -1024,9 +1077,10 @@ fn get_command_name(command: &Option<Command>) -> &'static str {
         Some(Command::Project {}) => "project",
         Some(Command::Projects) => "projects",
         Some(Command::Run { .. }) => "run",
+        Some(Command::Recipe { .. }) => "recipe",
+        Some(Command::Audit { .. }) => "audit",
         Some(Command::Schedule { .. }) => "schedule",
         Some(Command::Update { .. }) => "update",
-        Some(Command::Recipe { .. }) => "recipe",
         Some(Command::Web { .. }) => "web",
         Some(Command::Term { .. }) => "term",
         #[cfg(feature = "local-inference")]
@@ -1512,6 +1566,17 @@ fn handle_recipe_subcommand(command: RecipeCommand) -> Result<()> {
     }
 }
 
+async fn handle_audit_subcommand(command: AuditCommand) -> Result<()> {
+    match command {
+        AuditCommand::Summary { days } => handle_audit_summary(days).await,
+        AuditCommand::Session { session_id } => handle_audit_session(&session_id).await,
+        AuditCommand::Tokens { days } => handle_audit_tokens(days).await,
+        AuditCommand::Pii { days } => handle_audit_pii(days).await,
+        AuditCommand::Security { days } => handle_audit_security(days).await,
+        AuditCommand::Path => handle_audit_path().await,
+    }
+}
+
 async fn handle_term_subcommand(command: TermCommand) -> Result<()> {
     match command {
         TermCommand::Init {
@@ -1809,6 +1874,7 @@ pub async fn cli() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Command::Recipe { command }) => handle_recipe_subcommand(command),
+        Some(Command::Audit { command }) => handle_audit_subcommand(command).await,
         Some(Command::Web {
             port,
             host,

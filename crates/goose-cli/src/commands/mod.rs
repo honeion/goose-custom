@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod configure;
 pub mod info;
 pub mod project;
