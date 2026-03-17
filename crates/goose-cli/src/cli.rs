@@ -11,8 +11,8 @@ use goose_mcp::{
 };
 
 use crate::commands::audit::{
-    handle_audit_path, handle_audit_pii, handle_audit_security, handle_audit_session,
-    handle_audit_summary, handle_audit_tokens,
+    handle_audit_export, handle_audit_path, handle_audit_pii, handle_audit_security,
+    handle_audit_session, handle_audit_sessions, handle_audit_summary, handle_audit_tokens,
 };
 use crate::commands::configure::{configure_telemetry_consent_dialog, handle_configure};
 use crate::commands::info::handle_info;
@@ -636,6 +636,13 @@ enum AuditCommand {
         session_id: String,
     },
 
+    /// List all sessions
+    #[command(about = "List all sessions")]
+    Sessions {
+        #[arg(short, long, default_value = "7", help = "Number of days to include")]
+        days: u32,
+    },
+
     /// Show daily token usage
     #[command(about = "Show daily token usage")]
     Tokens {
@@ -660,6 +667,25 @@ enum AuditCommand {
     /// Show audit log path
     #[command(about = "Show audit log path")]
     Path,
+
+    /// Export audit logs
+    #[command(about = "Export audit logs to file")]
+    Export {
+        #[arg(short, long, default_value = "7", help = "Number of days to include")]
+        days: u32,
+
+        #[arg(short, long, default_value = "json", help = "Output format (json, csv, jsonl)")]
+        format: String,
+
+        #[arg(short, long, help = "Output file path (stdout if not specified)")]
+        output: Option<PathBuf>,
+
+        #[arg(short = 't', long = "type", help = "Filter by event type (e.g., TOOL_EXECUTION)")]
+        event_type: Option<String>,
+
+        #[arg(short = 's', long = "session", help = "Filter by session ID (prefix match)")]
+        session_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1570,10 +1596,18 @@ async fn handle_audit_subcommand(command: AuditCommand) -> Result<()> {
     match command {
         AuditCommand::Summary { days } => handle_audit_summary(days).await,
         AuditCommand::Session { session_id } => handle_audit_session(&session_id).await,
+        AuditCommand::Sessions { days } => handle_audit_sessions(days).await,
         AuditCommand::Tokens { days } => handle_audit_tokens(days).await,
         AuditCommand::Pii { days } => handle_audit_pii(days).await,
         AuditCommand::Security { days } => handle_audit_security(days).await,
         AuditCommand::Path => handle_audit_path().await,
+        AuditCommand::Export {
+            days,
+            format,
+            output,
+            event_type,
+            session_id,
+        } => handle_audit_export(days, &format, output, event_type, session_id).await,
     }
 }
 

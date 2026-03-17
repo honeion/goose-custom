@@ -8,7 +8,7 @@ use goose::audit::event::{AuditEvent, AuditEventType};
 use goose::config::paths::Paths;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 /// 감사 로그 요약 표시
@@ -308,6 +308,172 @@ pub async fn handle_audit_path() -> Result<()> {
     } else {
         println!();
         println!("  (디렉토리 없음)");
+    }
+
+    Ok(())
+}
+
+/// 감사 로그 내보내기
+pub async fn handle_audit_export(
+    days: u32,
+    format: &str,
+    output: Option<PathBuf>,
+    event_type: Option<String>,
+    session_id: Option<String>,
+) -> Result<()> {
+    let log_dir = get_audit_log_dir();
+
+    if !log_dir.exists() {
+        println!("📁 감사 로그 디렉토리가 없습니다.");
+        return Ok(());
+    }
+
+    let files = list_audit_files(&log_dir, days)?;
+    let mut all_events: Vec<AuditEvent> = Vec::new();
+
+    for file_path in &files {
+        let events = read_audit_file(file_path)?;
+        all_events.extend(events);
+    }
+
+    // 필터링
+    if let Some(ref etype) = event_type {
+        let etype_upper = etype.to_uppercase();
+        all_events.retain(|e| e.event_type.to_string().to_uppercase().contains(&etype_upper));
+    }
+
+    if let Some(ref sid) = session_id {
+        all_events.retain(|e| e.session_id.starts_with(sid));
+    }
+
+    // 시간순 정렬
+    all_events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    if all_events.is_empty() {
+        println!("📋 내보낼 이벤트가 없습니다.");
+        return Ok(());
+    }
+
+    let content = match format.to_lowercase().as_str() {
+        "json" => export_json(&all_events)?,
+        "csv" => export_csv(&all_events)?,
+        "jsonl" => export_jsonl(&all_events)?,
+        _ => {
+            println!("❌ 지원하지 않는 형식입니다. (json, csv, jsonl)");
+            return Ok(());
+        }
+    };
+
+    // 출력
+    match output {
+        Some(path) => {
+            let mut file = File::create(&path)?;
+            file.write_all(content.as_bytes())?;
+            println!("✅ {} 이벤트를 {} 형식으로 내보냈습니다.", all_events.len(), format);
+            println!("   파일: {}", path.display());
+        }
+        None => {
+            println!("{}", content);
+        }
+    }
+
+    Ok(())
+}
+
+/// JSON 형식으로 내보내기
+fn export_json(events: &[AuditEvent]) -> Result<String> {
+    let json = serde_json::to_string_pretty(events)?;
+    Ok(json)
+}
+
+/// JSONL 형식으로 내보내기 (원본 형식)
+fn export_jsonl(events: &[AuditEvent]) -> Result<String> {
+    let mut lines = Vec::new();
+    for event in events {
+        lines.push(serde_json::to_string(event)?);
+    }
+    Ok(lines.join("\n"))
+}
+
+/// CSV 형식으로 내보내기
+fn export_csv(events: &[AuditEvent]) -> Result<String> {
+    let mut csv = String::new();
+
+    // 헤더
+    csv.push_str("timestamp,session_id,event_type,summary\n");
+
+    // 데이터
+    for event in events {
+        let timestamp = event.timestamp.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S");
+        let summary = get_event_summary(event).replace(',', ";").replace('\n', " ");
+        csv.push_str(&format!(
+            "{},{},{},{}\n",
+            timestamp,
+            event.session_id,
+            event.event_type,
+            summary
+        ));
+    }
+
+    Ok(csv)
+}
+
+/// 세션 목록 표시
+pub async fn handle_audit_sessions(days: u32) -> Result<()> {
+    let log_dir = get_audit_log_dir();
+
+    if !log_dir.exists() {
+        println!("📁 감사 로그 디렉토리가 없습니다.");
+        return Ok(());
+    }
+
+    let files = list_audit_files(&log_dir, days)?;
+    let mut sessions: HashMap<String, (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, usize)> = HashMap::new();
+
+    for file_path in &files {
+        let events = read_audit_file(file_path)?;
+        for event in events {
+            let entry = sessions.entry(event.session_id.clone()).or_insert((
+                event.timestamp,
+                event.timestamp,
+                0,
+            ));
+            if event.timestamp < entry.0 {
+                entry.0 = event.timestamp;
+            }
+            if event.timestamp > entry.1 {
+                entry.1 = event.timestamp;
+            }
+            entry.2 += 1;
+        }
+    }
+
+    if sessions.is_empty() {
+        println!("📋 세션이 없습니다.");
+        return Ok(());
+    }
+
+    println!("📋 세션 목록 (최근 {}일)", days);
+    println!();
+    println!("  세션 ID                              시작 시간              이벤트 수");
+    println!("  ──────────────────────────────────────────────────────────────────────");
+
+    let mut sorted: Vec<_> = sessions.iter().collect();
+    sorted.sort_by(|a, b| b.1.0.cmp(&a.1.0)); // 최신 순
+
+    for (session_id, (start, _end, count)) in sorted.iter().take(20) {
+        let time = start.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S");
+        let short_id = if session_id.len() > 36 {
+            format!("{}...", &session_id[..33])
+        } else {
+            session_id.to_string()
+        };
+        println!("  {:<36} {}    {:>5}", short_id, time, count);
+    }
+
+    if sorted.len() > 20 {
+        println!();
+        println!("  ... 외 {} 세션", sorted.len() - 20);
     }
 
     Ok(())
