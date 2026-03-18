@@ -304,7 +304,229 @@ impl AuditPanel {
             _ => {}
         }
 
+        // R: HTML 리포트 생성
+        if key.code == KeyCode::Char('r') || key.code == KeyCode::Char('R') {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                self.generate_html_report();
+                return true;
+            }
+        }
+
         false
+    }
+
+    /// HTML 리포트 생성
+    fn generate_html_report(&mut self) {
+        use std::fs;
+        use std::io::Write;
+
+        let report_dir = Paths::in_state_dir("logs").join("audit").join("reports");
+        if let Err(e) = fs::create_dir_all(&report_dir) {
+            self.status_message = Some(format!("디렉토리 생성 실패: {}", e));
+            return;
+        }
+
+        let filename = format!("audit-report-{}.html", Local::now().format("%Y%m%d-%H%M%S"));
+        let filepath = report_dir.join(&filename);
+
+        // 통계 계산
+        let total_events = self.events.len();
+        let sessions = self.events.iter()
+            .filter(|e| matches!(e.data, AuditEventData::SessionStart(_)))
+            .count();
+
+        let mut input_tokens: u64 = 0;
+        let mut output_tokens: u64 = 0;
+        let mut tool_calls = 0usize;
+        let mut pii_masked = 0usize;
+        let mut security_events = 0usize;
+        let mut daily_tokens: HashMap<String, (u64, u64)> = HashMap::new();
+
+        for event in &self.events {
+            match &event.data {
+                AuditEventData::ApiResponse(data) => {
+                    input_tokens += data.usage.input;
+                    output_tokens += data.usage.output;
+                    let date = event.timestamp.with_timezone(&Local).format("%Y-%m-%d").to_string();
+                    let entry = daily_tokens.entry(date).or_insert((0, 0));
+                    entry.0 += data.usage.input;
+                    entry.1 += data.usage.output;
+                }
+                AuditEventData::ToolExecution(_) => tool_calls += 1,
+                AuditEventData::PiiMasked(data) => pii_masked += data.masked_count,
+                AuditEventData::SecurityEvent(_) => security_events += 1,
+                _ => {}
+            }
+        }
+
+        // HTML 생성
+        let html = self.build_html_report(
+            total_events, sessions, input_tokens, output_tokens,
+            tool_calls, pii_masked, security_events, &daily_tokens,
+        );
+
+        match fs::File::create(&filepath).and_then(|mut f| f.write_all(html.as_bytes())) {
+            Ok(_) => {
+                self.status_message = Some(format!("리포트 생성: {}", filename));
+                // 브라우저로 열기 시도
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("cmd").args(["/c", "start", filepath.to_str().unwrap_or("")]).spawn();
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(&filepath).spawn();
+                #[cfg(target_os = "linux")]
+                let _ = std::process::Command::new("xdg-open").arg(&filepath).spawn();
+            }
+            Err(e) => {
+                self.status_message = Some(format!("리포트 저장 실패: {}", e));
+            }
+        }
+    }
+
+    /// HTML 리포트 빌드
+    fn build_html_report(
+        &self,
+        total_events: usize,
+        sessions: usize,
+        input_tokens: u64,
+        output_tokens: u64,
+        tool_calls: usize,
+        pii_masked: usize,
+        security_events: usize,
+        daily_tokens: &HashMap<String, (u64, u64)>,
+    ) -> String {
+        let now = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let total_tokens = input_tokens + output_tokens;
+
+        // 일별 토큰 테이블
+        let mut dates: Vec<_> = daily_tokens.keys().cloned().collect();
+        dates.sort();
+        let daily_rows: String = dates.iter().map(|date| {
+            let (inp, out) = daily_tokens.get(date).unwrap_or(&(0, 0));
+            format!(
+                "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+                date, format_tokens(*inp), format_tokens(*out), format_tokens(inp + out)
+            )
+        }).collect::<Vec<_>>().join("\n");
+
+        // 보안 이벤트 테이블
+        let security_rows: String = self.events.iter()
+            .filter_map(|e| {
+                if let AuditEventData::SecurityEvent(data) = &e.data {
+                    let time = e.timestamp.with_timezone(&Local).format("%Y-%m-%d %H:%M");
+                    let severity_class = match data.severity {
+                        SecuritySeverity::Info => "info",
+                        SecuritySeverity::Warning => "warning",
+                        SecuritySeverity::Error => "error",
+                        SecuritySeverity::Critical => "critical",
+                    };
+                    Some(format!(
+                        "<tr><td>{}</td><td class=\"{}\">{:?}</td><td>{}</td><td>{}</td></tr>",
+                        time, severity_class, data.severity, data.event_name,
+                        data.action_taken.as_deref().unwrap_or("-")
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>().join("\n");
+
+        format!(r#"<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Goose 감사 로그 리포트</title>
+    <style>
+        :root {{ --primary: #6366f1; --success: #22c55e; --warning: #f59e0b; --error: #ef4444; --bg: #0f172a; --card: #1e293b; --text: #e2e8f0; --muted: #94a3b8; }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); padding: 2rem; line-height: 1.6; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        h1 {{ color: var(--primary); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem; }}
+        h1::before {{ content: '🪿'; }}
+        .meta {{ color: var(--muted); margin-bottom: 2rem; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
+        .card {{ background: var(--card); border-radius: 12px; padding: 1.5rem; }}
+        .card-title {{ color: var(--muted); font-size: 0.875rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+        .card-value {{ font-size: 2rem; font-weight: 700; margin-top: 0.5rem; }}
+        .card-value.tokens {{ color: var(--primary); }}
+        .card-value.sessions {{ color: var(--success); }}
+        .card-value.tools {{ color: #3b82f6; }}
+        .card-value.pii {{ color: #a855f7; }}
+        .card-value.security {{ color: var(--warning); }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 1rem; }}
+        th, td {{ padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid #334155; }}
+        th {{ color: var(--muted); font-weight: 500; font-size: 0.875rem; }}
+        .num {{ text-align: right; font-family: 'JetBrains Mono', monospace; }}
+        .info {{ color: #60a5fa; }}
+        .warning {{ color: var(--warning); }}
+        .error {{ color: var(--error); }}
+        .critical {{ color: #f87171; font-weight: 700; }}
+        section {{ margin-bottom: 2rem; }}
+        section h2 {{ color: var(--text); font-size: 1.25rem; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 2px solid var(--primary); }}
+        .empty {{ color: var(--muted); font-style: italic; padding: 2rem; text-align: center; }}
+        footer {{ margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #334155; color: var(--muted); font-size: 0.875rem; text-align: center; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>감사 로그 리포트</h1>
+        <p class="meta">생성: {} | 기간: 최근 {}일</p>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-title">총 토큰</div>
+                <div class="card-value tokens">{}</div>
+            </div>
+            <div class="card">
+                <div class="card-title">세션</div>
+                <div class="card-value sessions">{}</div>
+            </div>
+            <div class="card">
+                <div class="card-title">도구 호출</div>
+                <div class="card-value tools">{}</div>
+            </div>
+            <div class="card">
+                <div class="card-title">PII 마스킹</div>
+                <div class="card-value pii">{} 건</div>
+            </div>
+            <div class="card">
+                <div class="card-title">보안 이벤트</div>
+                <div class="card-value security">{}</div>
+            </div>
+            <div class="card">
+                <div class="card-title">총 이벤트</div>
+                <div class="card-value">{}</div>
+            </div>
+        </div>
+
+        <section class="card">
+            <h2>📊 일별 토큰 사용량</h2>
+            <table>
+                <thead><tr><th>날짜</th><th class="num">입력</th><th class="num">출력</th><th class="num">합계</th></tr></thead>
+                <tbody>{}</tbody>
+            </table>
+        </section>
+
+        <section class="card">
+            <h2>🛡️ 보안 이벤트</h2>
+            {}
+        </section>
+
+        <footer>
+            Goose Custom - 감사 로그 시스템
+        </footer>
+    </div>
+</body>
+</html>"#,
+            now, self.days,
+            format_tokens(total_tokens), sessions, tool_calls, pii_masked, security_events, total_events,
+            daily_rows,
+            if security_rows.is_empty() {
+                "<p class=\"empty\">보안 이벤트가 없습니다.</p>".to_string()
+            } else {
+                format!("<table><thead><tr><th>시간</th><th>심각도</th><th>이벤트</th><th>조치</th></tr></thead><tbody>{}</tbody></table>", security_rows)
+            }
+        )
     }
 
     /// 현재 뷰의 아이템 수
@@ -763,7 +985,9 @@ impl AuditPanel {
     /// 상태바 렌더링
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
         let mut spans = vec![
-            Span::styled(" Ctrl+R", Style::default().fg(Color::Green)),
+            Span::styled(" R", Style::default().fg(Color::Magenta)),
+            Span::raw(":리포트  "),
+            Span::styled("Ctrl+R", Style::default().fg(Color::Green)),
             Span::raw(":새로고침  "),
             Span::styled("Tab", Style::default().fg(Color::Green)),
             Span::raw(":탭전환  "),

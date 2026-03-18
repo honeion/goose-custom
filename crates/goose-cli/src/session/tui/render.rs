@@ -474,7 +474,7 @@ impl<'a> TuiApp<'a> {
                 format!("🎨{}", self.theme_name.label()),
                 self.theme.info
             ),
-            Span::styled(" F1:? F2:🖱️ F3:📋 F4:🎨 F5:📝", self.theme.dimmed),
+            Span::styled(" F1:? F2:🖱️ F3:📋 F4:🎨 F5:📝 F6:📊", self.theme.dimmed),
         ]);
 
         let paragraph = Paragraph::new(status_line)

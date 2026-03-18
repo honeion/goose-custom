@@ -28,7 +28,7 @@ use crossterm::{
 use tokio_util::sync::CancellationToken;
 
 use super::tui::{
-    app::TuiApp,
+    app::{InputMode, TuiApp},
     events::{event_to_action, Action, UpdateResult},
 };
 use crate::CliSession;
@@ -63,8 +63,12 @@ async fn run_tui_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     session: &mut CliSession,
 ) -> Result<()> {
-    let provider = std::env::var("GOOSE_PROVIDER").unwrap_or_else(|_| "openai".to_string());
-    let model = std::env::var("GOOSE_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
+    let provider = std::env::var("GOOSE_PROVIDER")
+        .or_else(|_| Config::global().get_param::<String>("GOOSE_PROVIDER"))
+        .unwrap_or_else(|_| "openai".to_string());
+    let model = std::env::var("GOOSE_MODEL")
+        .or_else(|_| Config::global().get_param::<String>("GOOSE_MODEL"))
+        .unwrap_or_else(|_| "gpt-4o".to_string());
     let model_name = format!("{} {}", provider, model);
     let mut app = TuiApp::new(session.session_id.clone(), model_name);
 
@@ -255,6 +259,13 @@ async fn process_agent_message(
                     Action::Quit => {
                         cancel_token.cancel();
                         app.finish_streaming();
+                        return Ok(());
+                    }
+                    // ESC during streaming = interrupt (stop generation)
+                    Action::SwitchMode(InputMode::Normal) => {
+                        cancel_token.cancel();
+                        app.finish_streaming();
+                        app.add_system_message("⚠️ 응답 생성이 중단되었습니다.".to_string());
                         return Ok(());
                     }
                     Action::ScrollUp(_) | Action::ScrollDown(_)
