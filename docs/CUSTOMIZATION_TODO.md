@@ -151,28 +151,6 @@ $env:AZURE_OPENAI_DEPLOYMENT_NAME = "your-deployment"
 
 **설계 문서:** `010-goosehints-design.md`
 
-### Phase 9: F7 설정 패널 + PII 화이트리스트 ✅ 완료 (2026-03-20)
-
-| 기능 | 상태 | 설명 |
-|------|------|------|
-| PiiMasker 화이트리스트 | ✅ 완료 | 정확한 값 매칭으로 마스킹 스킵 |
-| PiiMasker 카테고리 비활성화 | ✅ 완료 | Secret/Token/Credential/Certificate 개별 on/off |
-| Agent 런타임 메서드 | ✅ 완료 | set/get whitelist, disabled_types, enabled |
-| F7 설정 패널 UI | ✅ 완료 | `tui/config_panel.rs` |
-| Config 영속화 | ✅ 완료 | Ctrl+S → config.yaml + 런타임 즉시 적용 |
-| /config 명령어 | ✅ 완료 | 슬래시 명령어로 패널 열기 |
-| Ctrl+C 수정 | ✅ 완료 | 패널 열려있어도 종료 가능 (F5/F6/F7 공통) |
-| GooseMode 토글 | ✅ 완료 | Auto/Approve/SmartApprove/Chat 순환 |
-
-**설정 패널 탭:**
-```
-General  : Provider (표시), Model (표시), Mode (토글)
-PII 마스킹: on/off, 4개 카테고리 토글, 화이트리스트 관리
-고급     : Max Tokens (+/-), Max Turns (+/-), API Version (표시), 감사 로깅 (토글)
-```
-
-**키바인딩:** F7 (패널 토글), Ctrl+S (저장), Tab (탭전환), ↑↓ (이동), Space (토글), A/D (추가/삭제)
-
 ### PII 마스킹 개요
 
 ```
@@ -632,9 +610,6 @@ crates/goose-cli/src/session/
 | F2 | 마우스 캡처 토글 |
 | F3 | 도구 출력 패널 토글 |
 | F4 | 테마 전환 (Dark/Light) |
-| F5 | Hints 편집 패널 |
-| F6 | 감사 로그 패널 |
-| F7 | 설정 패널 |
 | Tab | 패널 포커스 전환 |
 | Esc | Normal 모드 |
 | i/a | Insert 모드 |
