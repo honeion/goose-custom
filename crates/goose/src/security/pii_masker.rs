@@ -9,7 +9,7 @@
 //! 사용하여 `MaskedPiiItem`으로 변환합니다. 원본 값은 절대 로그에 기록되지 않습니다.
 
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::pii_patterns::{MaskType, PiiPattern, PII_PATTERNS};
 use crate::audit::event::{MaskedPiiItem, PiiPosition};
@@ -89,6 +89,10 @@ pub struct PiiMasker {
     counters: HashMap<MaskType, usize>,
     /// 활성화 여부
     enabled: bool,
+    /// 화이트리스트 - 정확한 값 매칭으로 마스킹 건너뛰기
+    whitelist_values: HashSet<String>,
+    /// 비활성화된 마스크 타입 카테고리
+    disabled_types: HashSet<MaskType>,
 }
 
 impl PiiMasker {
@@ -123,6 +127,8 @@ impl PiiMasker {
             reverse_mappings: HashMap::new(),
             counters: HashMap::new(),
             enabled: true,
+            whitelist_values: HashSet::new(),
+            disabled_types: HashSet::new(),
         }
     }
 
@@ -134,6 +140,26 @@ impl PiiMasker {
     /// 마스킹 활성화 여부
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// 화이트리스트 설정 (정확한 값 매칭으로 마스킹 건너뛰기)
+    pub fn set_whitelist(&mut self, values: Vec<String>) {
+        self.whitelist_values = values.into_iter().collect();
+    }
+
+    /// 화이트리스트 조회
+    pub fn get_whitelist(&self) -> Vec<String> {
+        self.whitelist_values.iter().cloned().collect()
+    }
+
+    /// 비활성화할 마스크 타입 설정
+    pub fn set_disabled_types(&mut self, types: HashSet<MaskType>) {
+        self.disabled_types = types;
+    }
+
+    /// 비활성화된 마스크 타입 조회
+    pub fn get_disabled_types(&self) -> Vec<MaskType> {
+        self.disabled_types.iter().cloned().collect()
     }
 
     /// 입력 텍스트에서 PII를 마스킹
@@ -158,6 +184,11 @@ impl PiiMasker {
 
         // 각 패턴에 대해 마스킹 수행
         for (regex, pattern_name, mask_type, value_group) in pattern_infos {
+            // 비활성화된 카테고리 스킵
+            if self.disabled_types.contains(&mask_type) {
+                continue;
+            }
+
             // 모든 매치를 먼저 찾음 (소유권 있는 데이터로 복사)
             let matches: Vec<(usize, usize, String)> = regex
                 .find_iter(&masked_text)
@@ -178,6 +209,11 @@ impl PiiMasker {
                 } else {
                     full_match_str
                 };
+
+                // 화이트리스트에 있는 값 스킵
+                if self.whitelist_values.contains(value) {
+                    continue;
+                }
 
                 // 이미 마스킹된 토큰이 포함되어 있으면 스킵 (중복 처리 방지)
                 // 토큰 형식: [SECRET_1], [CRED_2], [CERT_3], [TOKEN_4]
@@ -421,6 +457,54 @@ MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7
         assert_eq!(item.pattern_name, "password_assignment");
         // partial_original은 일부만 표시
         assert!(item.partial_original.contains("*"));
+    }
+
+    #[test]
+    fn test_whitelist_skip() {
+        let mut masker = PiiMasker::new();
+        masker.set_whitelist(vec!["test_password".to_string()]);
+
+        let result = masker.mask("password=test_password");
+        // 화이트리스트에 있으므로 마스킹 안 됨
+        assert_eq!(result.masked_text, "password=test_password");
+        assert_eq!(result.masked_count, 0);
+
+        // 화이트리스트에 없는 값은 마스킹됨
+        let result = masker.mask("password=real_secret");
+        assert!(result.masked_text.contains("[SECRET_"));
+        assert_eq!(result.masked_count, 1);
+    }
+
+    #[test]
+    fn test_disabled_types() {
+        let mut masker = PiiMasker::new();
+        let mut disabled = std::collections::HashSet::new();
+        disabled.insert(MaskType::Token);
+        masker.set_disabled_types(disabled);
+
+        // Token 타입은 비활성화됨 - Bearer 토큰이 마스킹 안 됨
+        let result = masker.mask("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.xxx");
+        assert!(result.masked_text.contains("Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"));
+        assert_eq!(result.masked_count, 0);
+
+        // Secret 타입은 여전히 활성화됨
+        let result2 = masker.mask("api_key=sk-1234567890abcdef1234567890abcdef");
+        assert!(result2.masked_text.contains("[SECRET_"));
+    }
+
+    #[test]
+    fn test_get_whitelist_and_disabled_types() {
+        let mut masker = PiiMasker::new();
+        masker.set_whitelist(vec!["val1".to_string(), "val2".to_string()]);
+        let wl = masker.get_whitelist();
+        assert_eq!(wl.len(), 2);
+
+        let mut disabled = std::collections::HashSet::new();
+        disabled.insert(MaskType::Token);
+        masker.set_disabled_types(disabled);
+        let dt = masker.get_disabled_types();
+        assert_eq!(dt.len(), 1);
+        assert!(dt.contains(&MaskType::Token));
     }
 
     // ============================================================

@@ -14,6 +14,7 @@ use tui_textarea::TextArea;
 
 use super::animation::SpinnerFrames;
 use super::audit_panel::AuditPanel;
+use super::config_panel::ConfigPanel;
 use super::hints_panel::HintsPanel;
 use super::markdown::{DiffStyles, is_diff_preview, parse_diff};
 use super::offscreen_buffer::{PanelId, PanelManager};
@@ -311,6 +312,9 @@ pub struct TuiApp<'a> {
     // 감사 로그 패널 (F6)
     pub audit_panel: AuditPanel,
 
+    // 설정 패널 (F7)
+    pub config_panel: ConfigPanel,
+
     // TachyonFX 효과 - 비활성화 (깜빡거림 이슈)
     // pub message_effect: Option<Effect>,
     // pub effect_area: Option<Rect>,
@@ -361,6 +365,7 @@ impl<'a> TuiApp<'a> {
 
             hints_panel: HintsPanel::new(),
             audit_panel: AuditPanel::new(),
+            config_panel: ConfigPanel::new(),
 
             // TachyonFX 비활성화
             // message_effect: None,

@@ -90,6 +90,14 @@ impl<'a> TuiApp<'a> {
             self.audit_panel.render(frame, panel_area);
         }
 
+        // 설정 패널 (최상위)
+        if self.config_panel.visible {
+            let width = (area.width * 70 / 100).max(50);
+            let height = (area.height * 70 / 100).max(18);
+            let panel_area = centered_rect(width, height, area);
+            self.config_panel.render(frame, panel_area);
+        }
+
         // TachyonFX 효과 - 비활성화 (깜빡거림 이슈)
         // if self.message_effect.is_some() {
         //     self.set_effect_area(conversation_area);
@@ -474,7 +482,7 @@ impl<'a> TuiApp<'a> {
                 format!("🎨{}", self.theme_name.label()),
                 self.theme.info
             ),
-            Span::styled(" F1:? F2:🖱️ F3:📋 F4:🎨 F5:📝 F6:📊", self.theme.dimmed),
+            Span::styled(" F1:? F2:🖱️ F3:📋 F4:🎨 F5:📝 F6:📊 F7:⚙️", self.theme.dimmed),
         ]);
 
         let paragraph = Paragraph::new(status_line)
@@ -522,6 +530,7 @@ impl<'a> TuiApp<'a> {
             Line::raw(" F4           테마 변경"),
             Line::raw(" F5           Hints 편집 패널"),
             Line::raw(" F6           감사 로그 패널"),
+            Line::raw(" F7           설정 패널"),
             Line::raw(""),
             Line::styled(" 마우스", self.theme.header),
             Line::styled(" ─────────────────────────────", self.theme.border),

@@ -316,6 +316,39 @@ impl Agent {
         tracing::debug!("PII 마스킹 테이블 초기화됨");
     }
 
+    /// PII 마스킹 런타임 활성화/비활성화
+    pub async fn set_pii_enabled(&self, enabled: bool) {
+        let mut masker = self.pii_masker.lock().await;
+        masker.set_enabled(enabled);
+        tracing::info!("PII 마스킹 {}됨", if enabled { "활성화" } else { "비활성화" });
+    }
+
+    /// PII 화이트리스트 설정
+    pub async fn set_pii_whitelist(&self, values: Vec<String>) {
+        let mut masker = self.pii_masker.lock().await;
+        tracing::info!("PII 화이트리스트 업데이트: {} 항목", values.len());
+        masker.set_whitelist(values);
+    }
+
+    /// PII 비활성화 타입 설정
+    pub async fn set_pii_disabled_types(&self, types: std::collections::HashSet<crate::security::pii_patterns::MaskType>) {
+        let mut masker = self.pii_masker.lock().await;
+        tracing::info!("PII 비활성화 타입 업데이트: {:?}", types);
+        masker.set_disabled_types(types);
+    }
+
+    /// PII 화이트리스트 조회
+    pub async fn get_pii_whitelist(&self) -> Vec<String> {
+        let masker = self.pii_masker.lock().await;
+        masker.get_whitelist()
+    }
+
+    /// PII 비활성화 타입 조회
+    pub async fn get_pii_disabled_types(&self) -> Vec<crate::security::pii_patterns::MaskType> {
+        let masker = self.pii_masker.lock().await;
+        masker.get_disabled_types()
+    }
+
     /// Message의 텍스트 콘텐츠 마스킹
     pub async fn mask_message(&self, message: &Message) -> Message {
         self.mask_message_with_info(message).await.0

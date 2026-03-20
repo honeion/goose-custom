@@ -60,6 +60,8 @@ pub enum Action {
     ToggleHintsPanel,
     /// 감사 로그 패널 토글 (F6)
     ToggleAuditPanel,
+    /// 설정 패널 토글 (F7)
+    ToggleConfigPanel,
 }
 
 /// 업데이트 결과
@@ -251,6 +253,11 @@ impl<'a> TuiApp<'a> {
                 self.audit_panel.toggle();
                 UpdateResult::Continue
             }
+
+            Action::ToggleConfigPanel => {
+                self.config_panel.toggle();
+                UpdateResult::Continue
+            }
         }
     }
 
@@ -262,25 +269,35 @@ impl<'a> TuiApp<'a> {
             return None;
         }
 
+        // 패널이 열려있어도 Ctrl+C는 항상 동작
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Some(Action::Quit);
+        }
+
         // Hints 패널이 열려있을 때 - F5 또는 패널 내부 키 처리
         if self.hints_panel.visible {
-            // F5로 닫기
             if key.code == KeyCode::F(5) {
                 return Some(Action::ToggleHintsPanel);
             }
-            // 패널 내부 키 처리 (이벤트 소비됨)
             self.hints_panel.handle_key(key);
             return None;
         }
 
         // 감사 로그 패널이 열려있을 때 - F6 또는 패널 내부 키 처리
         if self.audit_panel.visible {
-            // F6으로 닫기
             if key.code == KeyCode::F(6) {
                 return Some(Action::ToggleAuditPanel);
             }
-            // 패널 내부 키 처리 (이벤트 소비됨)
             self.audit_panel.handle_key(key);
+            return None;
+        }
+
+        // 설정 패널이 열려있을 때 - F7 또는 패널 내부 키 처리
+        if self.config_panel.visible {
+            if key.code == KeyCode::F(7) {
+                return Some(Action::ToggleConfigPanel);
+            }
+            self.config_panel.handle_key(key);
             return None;
         }
 
@@ -456,6 +473,9 @@ impl<'a> TuiApp<'a> {
             // 감사 로그 패널 토글
             (KeyCode::F(6), _) => Some(Action::ToggleAuditPanel),
 
+            // 설정 패널 토글
+            (KeyCode::F(7), _) => Some(Action::ToggleConfigPanel),
+
             // 기본 입력은 TextArea가 처리
             _ => {
                 self.input.input(key);
@@ -505,6 +525,7 @@ impl<'a> TuiApp<'a> {
             KeyCode::F(4) => Some(Action::ToggleTheme),
             KeyCode::F(5) => Some(Action::ToggleHintsPanel),
             KeyCode::F(6) => Some(Action::ToggleAuditPanel),
+            KeyCode::F(7) => Some(Action::ToggleConfigPanel),
 
             _ => None,
         }

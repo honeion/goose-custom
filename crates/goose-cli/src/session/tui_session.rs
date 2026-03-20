@@ -73,10 +73,11 @@ async fn run_tui_loop(
     let mut app = TuiApp::new(session.session_id.clone(), model_name);
 
     // 감사 로거 초기화
+    let audit_enabled = Config::global()
+        .get_param::<bool>("AUDIT_LOG_ENABLED")
+        .unwrap_or(true);
     let audit_config = AuditConfig {
-        enabled: Config::global()
-            .get_param::<bool>("AUDIT_LOG_ENABLED")
-            .unwrap_or(true),
+        enabled: audit_enabled,
         retention_days: Config::global()
             .get_param::<u32>("AUDIT_RETENTION_DAYS")
             .unwrap_or(30),
@@ -99,6 +100,51 @@ async fn run_tui_loop(
     app.pii_masking_enabled = Config::global()
         .get_param::<bool>("PII_MASKING_ENABLED")
         .unwrap_or(true);
+
+    // 설정 패널 초기값 로드
+    app.config_panel.provider_name = provider.clone();
+    app.config_panel.model_name = model.clone();
+    app.config_panel.goose_mode = Config::global()
+        .get_goose_mode()
+        .unwrap_or(goose::config::GooseMode::Auto);
+    app.config_panel.pii_enabled = app.pii_masking_enabled;
+    app.config_panel.audit_enabled = audit_enabled;
+    app.config_panel.max_tokens = app.token_usage.max;
+    app.config_panel.max_turns = Config::global()
+        .get_param::<u32>("GOOSE_MAX_TURNS")
+        .unwrap_or(1000);
+    // API Version은 Azure 전용, 다른 프로바이더는 N/A
+    app.config_panel.api_version = if provider.contains("azure") {
+        Config::global()
+            .get_param::<String>("AZURE_OPENAI_API_VERSION")
+            .or_else(|_| std::env::var("AZURE_OPENAI_API_VERSION"))
+            .unwrap_or_else(|_| "2024-10-21".to_string())
+    } else {
+        "N/A".to_string()
+    };
+
+    // PII 화이트리스트 로드
+    if let Ok(whitelist) = Config::global().get_param::<Vec<String>>("PII_WHITELIST_VALUES") {
+        app.config_panel.pii_whitelist = whitelist.clone();
+        session.agent.set_pii_whitelist(whitelist).await;
+    }
+
+    // PII 비활성화 타입 로드
+    if let Ok(disabled_strs) = Config::global().get_param::<Vec<String>>("PII_DISABLED_TYPES") {
+        let mut disabled_types = std::collections::HashSet::new();
+        for s in &disabled_strs {
+            match s.as_str() {
+                "Secret" => { disabled_types.insert(goose::security::pii_patterns::MaskType::Secret); app.config_panel.pii_secret_enabled = false; }
+                "Token" => { disabled_types.insert(goose::security::pii_patterns::MaskType::Token); app.config_panel.pii_token_enabled = false; }
+                "Credential" => { disabled_types.insert(goose::security::pii_patterns::MaskType::Credential); app.config_panel.pii_credential_enabled = false; }
+                "Certificate" => { disabled_types.insert(goose::security::pii_patterns::MaskType::Certificate); app.config_panel.pii_certificate_enabled = false; }
+                _ => {}
+            }
+        }
+        if !disabled_types.is_empty() {
+            session.agent.set_pii_disabled_types(disabled_types).await;
+        }
+    }
 
     // 환영 메시지
     let welcome_msg = if app.pii_masking_enabled {
@@ -189,6 +235,12 @@ async fn run_tui_loop(
                     }
                     _ => {}
                 }
+            }
+
+            // 설정 패널 변경사항 처리 (패널 내부 키는 None 반환하므로 if-let 밖에서 처리)
+            let config_changes = app.config_panel.take_pending_changes();
+            for change in config_changes {
+                apply_config_change(&change, session, &mut app).await;
             }
         }
 
@@ -442,8 +494,11 @@ fn handle_slash_command(cmd: &str, app: &mut TuiApp) {
         _ if cmd.starts_with("/audit") => {
             handle_audit_command(cmd, app);
         }
+        "/config" | "/settings" => {
+            app.config_panel.open();
+        }
         _ => {
-            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme) /hints /audit", cmd));
+            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme) /hints /audit /config", cmd));
         }
     }
 }
@@ -656,6 +711,56 @@ fn handle_hints_command(cmd: &str, app: &mut TuiApp) {
             app.add_system_message(format!(
                 "❓ 알 수 없는 hints 서브명령어: {}\n\n사용법:\n  /hints [show]     - 로드된 hints 표시\n  /hints reload     - hints 다시 로드\n  /hints add <g|p|l> - hints 파일 생성\n  /hints edit <g|p|l> - hints 편집\n  /hints path       - 경로 정보\n  /hints panel      - 편집 패널 열기 (F5)",
                 subcmd
+            ));
+        }
+    }
+}
+
+/// 설정 변경사항 에이전트에 적용
+async fn apply_config_change(
+    change: &super::tui::config_panel::ConfigChange,
+    session: &mut CliSession,
+    app: &mut TuiApp<'_>,
+) {
+    use super::tui::config_panel::ConfigChange;
+
+    match change {
+        ConfigChange::ModeChanged(mode) => {
+            let mode_label = format!("{:?}", mode);
+            app.add_system_message(format!("⚙️ 실행 모드 변경: {}", mode_label));
+        }
+        ConfigChange::PiiToggled(enabled) => {
+            session.agent.set_pii_enabled(*enabled).await;
+            app.pii_masking_enabled = *enabled;
+            app.add_system_message(format!(
+                "🔒 PII 마스킹 {}",
+                if *enabled { "활성화됨" } else { "비활성화됨" }
+            ));
+        }
+        ConfigChange::PiiWhitelistUpdated(values) => {
+            session.agent.set_pii_whitelist(values.clone()).await;
+            app.add_system_message(format!("📋 PII 화이트리스트 업데이트 ({} 항목)", values.len()));
+        }
+        ConfigChange::PiiDisabledTypesUpdated(types) => {
+            session.agent.set_pii_disabled_types(types.clone()).await;
+            if types.is_empty() {
+                app.add_system_message("🔒 모든 PII 카테고리 활성화됨".to_string());
+            } else {
+                let names: Vec<String> = types.iter().map(|t| format!("{:?}", t)).collect();
+                app.add_system_message(format!("🔒 PII 카테고리 비활성화: {}", names.join(", ")));
+            }
+        }
+        ConfigChange::MaxTokensChanged(max) => {
+            app.token_usage.max = *max;
+        }
+        ConfigChange::MaxTurnsChanged(turns) => {
+            session.max_turns = Some(*turns);
+            app.add_system_message(format!("🔄 Max Turns 변경: {}", turns));
+        }
+        ConfigChange::AuditToggled(enabled) => {
+            app.add_system_message(format!(
+                "📊 감사 로깅 {}",
+                if *enabled { "활성화됨" } else { "비활성화됨" }
             ));
         }
     }

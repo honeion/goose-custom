@@ -6,6 +6,7 @@
 pub mod animation;
 pub mod app;
 pub mod audit_panel;
+pub mod config_panel;
 pub mod events;
 pub mod hints_panel;
 pub mod markdown;
