@@ -31,6 +31,7 @@ pub enum ThreatCategory {
     ProcessManipulation,
     PrivilegeEscalation,
     CommandInjection,
+    PromptInjection,
 }
 
 impl RiskLevel {
@@ -352,11 +353,131 @@ pub const THREAT_PATTERNS: &[ThreatPattern] = &[
     },
 ];
 
+/// 프롬프트 인젝션 패턴 (LLM 조작 시도 탐지)
+pub const PROMPT_INJECTION_PATTERNS: &[ThreatPattern] = &[
+    // === 직접적 지시 무시 시도 ===
+    ThreatPattern {
+        name: "ignore_instructions_en",
+        pattern: r"(?i)(ignore|disregard|forget|override|bypass)\s+(all\s+)?(previous|prior|above|earlier|system)\s+(instructions?|prompts?|rules?|constraints?|guidelines?)",
+        description: "Attempt to override system instructions (EN)",
+        risk_level: RiskLevel::Critical,
+        category: ThreatCategory::PromptInjection,
+    },
+    ThreatPattern {
+        name: "ignore_instructions_ko",
+        pattern: r"(이전|위의?|기존|앞의?|시스템)\s*(지시|지침|명령|규칙|제약|프롬프트)를?\s*(무시|잊어|버려|취소|무효화|오버라이드)",
+        description: "Attempt to override system instructions (KO)",
+        risk_level: RiskLevel::Critical,
+        category: ThreatCategory::PromptInjection,
+    },
+    // === 역할 변경 / 탈옥 ===
+    ThreatPattern {
+        name: "dan_jailbreak",
+        pattern: r"(?i)(you\s+are\s+now|act\s+as|pretend\s+(to\s+be|you\s+are)|roleplay\s+as|you\s+must\s+act)\s+(DAN|evil|unrestricted|unfiltered|jailbroken|an?\s+AI\s+without)",
+        description: "DAN/jailbreak role-play attempt",
+        risk_level: RiskLevel::Critical,
+        category: ThreatCategory::PromptInjection,
+    },
+    ThreatPattern {
+        name: "role_override",
+        pattern: r"(?i)(from\s+now\s+on|starting\s+now|henceforth)\s+(you\s+are|you\s+will|act\s+as|behave\s+as)",
+        description: "Role override attempt",
+        risk_level: RiskLevel::High,
+        category: ThreatCategory::PromptInjection,
+    },
+    ThreatPattern {
+        name: "role_override_ko",
+        pattern: r"(지금부터|이제부터|앞으로)\s*(너는|넌|당신은)\s*(제한|규칙|필터).*(없는|없이|무시)",
+        description: "Role override attempt (KO)",
+        risk_level: RiskLevel::High,
+        category: ThreatCategory::PromptInjection,
+    },
+    // === 시스템 프롬프트 추출 ===
+    ThreatPattern {
+        name: "system_prompt_extraction",
+        pattern: r"(?i)(show|display|print|reveal|output|tell\s+me|repeat|what\s+is)\s+(your\s+)?(system\s+prompt|initial\s+prompt|instructions|hidden\s+instructions|secret\s+instructions|original\s+prompt)",
+        description: "System prompt extraction attempt",
+        risk_level: RiskLevel::High,
+        category: ThreatCategory::PromptInjection,
+    },
+    ThreatPattern {
+        name: "system_prompt_extraction_ko",
+        pattern: r"(시스템\s*프롬프트|초기\s*지시|숨겨진\s*지침|비밀\s*명령|원래\s*프롬프트)를?\s*(보여|알려|출력|공개|말해)",
+        description: "System prompt extraction attempt (KO)",
+        risk_level: RiskLevel::High,
+        category: ThreatCategory::PromptInjection,
+    },
+    // === 제한 해제 시도 ===
+    ThreatPattern {
+        name: "remove_restrictions",
+        pattern: r"(?i)(remove|disable|turn\s+off|deactivate|lift)\s+(all\s+)?(restrictions?|limitations?|filters?|safety|guardrails?|content\s+filter)",
+        description: "Attempt to remove safety restrictions",
+        risk_level: RiskLevel::High,
+        category: ThreatCategory::PromptInjection,
+    },
+    ThreatPattern {
+        name: "no_restrictions",
+        pattern: r"(?i)(without|no|zero)\s+(any\s+)?(restrictions?|limitations?|filters?|safety\s+measures?|ethical\s+constraints?|boundaries)",
+        description: "Request for unrestricted output",
+        risk_level: RiskLevel::Medium,
+        category: ThreatCategory::PromptInjection,
+    },
+    // === 간접 인젝션 (도구 출력/파일 내용 경유) ===
+    ThreatPattern {
+        name: "indirect_injection_marker",
+        pattern: r"(?i)\[SYSTEM\]|\[INST\]|<<SYS>>|<\|im_start\|>system|<system>|###\s*(System|Instruction|Human):",
+        description: "Indirect injection via system markers in content",
+        risk_level: RiskLevel::Critical,
+        category: ThreatCategory::PromptInjection,
+    },
+    ThreatPattern {
+        name: "hidden_instruction_in_content",
+        pattern: r"(?i)(IMPORTANT|CRITICAL|URGENT|NOTE\s+TO\s+AI|INSTRUCTION\s+FOR\s+AI|AI\s+INSTRUCTION):?\s*(ignore|override|disregard|you\s+must)",
+        description: "Hidden instruction embedded in content",
+        risk_level: RiskLevel::High,
+        category: ThreatCategory::PromptInjection,
+    },
+    // === 출력 조작 ===
+    ThreatPattern {
+        name: "output_manipulation",
+        pattern: r"(?i)(do\s+not\s+mention|never\s+say|hide\s+the\s+fact|don't\s+tell|keep\s+secret)\s+(that\s+)?(you\s+are|this\s+is|I\s+asked)",
+        description: "Attempt to manipulate output transparency",
+        risk_level: RiskLevel::Medium,
+        category: ThreatCategory::PromptInjection,
+    },
+    // === 인코딩/난독화 우회 ===
+    ThreatPattern {
+        name: "encoded_injection",
+        pattern: r"(?i)(decode|translate|convert)\s+(this|the\s+following)\s+(base64|hex|rot13|binary|morse)",
+        description: "Encoded instruction injection",
+        risk_level: RiskLevel::Medium,
+        category: ThreatCategory::PromptInjection,
+    },
+    // === 다단계 공격 ===
+    ThreatPattern {
+        name: "multi_step_injection",
+        pattern: r"(?i)(step\s+1|first)\s*:?\s*(ignore|forget|disregard).*(step\s+2|then|next)\s*:?\s*(execute|run|do|perform)",
+        description: "Multi-step injection attack",
+        risk_level: RiskLevel::High,
+        category: ThreatCategory::PromptInjection,
+    },
+];
+
 lazy_static! {
     static ref COMPILED_PATTERNS: HashMap<&'static str, Regex> = {
         let mut patterns = HashMap::new();
         for threat in THREAT_PATTERNS {
             if let Ok(regex) = Regex::new(&format!("(?i){}", threat.pattern)) {
+                patterns.insert(threat.name, regex);
+            }
+        }
+        patterns
+    };
+
+    static ref COMPILED_PROMPT_INJECTION_PATTERNS: HashMap<&'static str, Regex> = {
+        let mut patterns = HashMap::new();
+        for threat in PROMPT_INJECTION_PATTERNS {
+            if let Ok(regex) = Regex::new(threat.pattern) {
                 patterns.insert(threat.name, regex);
             }
         }
@@ -404,6 +525,27 @@ impl PatternMatcher {
     /// Get the highest risk level from matches
     pub fn get_max_risk_level(&self, matches: &[PatternMatch]) -> Option<RiskLevel> {
         matches.iter().map(|m| &m.threat.risk_level).max().cloned()
+    }
+
+    /// 프롬프트 인젝션 패턴 스캔
+    pub fn scan_for_prompt_injection(&self, text: &str) -> Vec<PatternMatch> {
+        let mut matches = Vec::new();
+
+        for threat in PROMPT_INJECTION_PATTERNS {
+            if let Some(regex) = COMPILED_PROMPT_INJECTION_PATTERNS.get(threat.name) {
+                for regex_match in regex.find_iter(text) {
+                    matches.push(PatternMatch {
+                        threat: threat.clone(),
+                        matched_text: regex_match.as_str().to_string(),
+                        start_pos: regex_match.start(),
+                        end_pos: regex_match.end(),
+                    });
+                }
+            }
+        }
+
+        matches.sort_by_key(|m| (std::cmp::Reverse(m.threat.risk_level.clone()), m.start_pos));
+        matches
     }
 
     /// Check if any critical or high-risk patterns are detected
