@@ -14,6 +14,7 @@ use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use image::GenericImageView;
 use indoc::formatdoc;
+use docx_rs::{read_docx, DocumentChild};
 use lopdf::Document as PdfDocument;
 use rmcp::model::{Content, ErrorCode, ErrorData, Role};
 use std::{
@@ -29,6 +30,7 @@ pub const LINE_READ_LIMIT: usize = 2000;
 pub const MAX_FILE_SIZE: u64 = 400 * 1024; // 400KB
 pub const MAX_PDF_SIZE: u64 = 10 * 1024 * 1024; // 10MB for PDFs
 pub const MAX_IMAGE_SIZE: u64 = 50 * 1024 * 1024; // 50MB for images
+pub const MAX_OFFICE_SIZE: u64 = 50 * 1024 * 1024; // 50MB for Office docs
 
 /// Parameters for the read tool
 #[derive(Debug, Clone)]
@@ -58,6 +60,8 @@ pub async fn read(params: ReadParams) -> Result<Vec<Content>, ErrorData> {
 
     match extension.as_deref() {
         Some("pdf") => read_pdf(path).await,
+        Some("docx") => read_docx_file(path).await,
+        Some("xlsx") | Some("xls") => read_xlsx_file(path).await,
         Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("bmp") | Some("webp") | Some("ico") => {
             read_image_metadata(path).await
         }
@@ -141,6 +145,163 @@ async fn read_pdf(path: &Path) -> Result<Vec<Content>, ErrorData> {
             truncation = truncation_note,
         }
     };
+
+    Ok(vec![
+        Content::text(output.clone()).with_audience(vec![Role::Assistant]),
+        Content::text(output).with_audience(vec![Role::User]).with_priority(0.2),
+    ])
+}
+
+/// Reads DOCX file and extracts text content
+async fn read_docx_file(path: &Path) -> Result<Vec<Content>, ErrorData> {
+    if !path.is_file() {
+        return Err(ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            format!("The path '{}' does not exist or is not accessible.", path.display()),
+            None,
+        ));
+    }
+
+    let file_size = std::fs::metadata(path)
+        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("Failed to get file metadata: {}", e), None))?
+        .len();
+
+    if file_size > MAX_OFFICE_SIZE {
+        return Err(ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            format!("DOCX file '{}' is too large ({:.2}MB). Maximum size is 50MB.", path.display(), file_size as f64 / 1024.0 / 1024.0),
+            None,
+        ));
+    }
+
+    let file_bytes = std::fs::read(path).map_err(|e| {
+        ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("Failed to read DOCX file: {}", e), None)
+    })?;
+
+    let docx = read_docx(&file_bytes).map_err(|e| {
+        ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("Failed to parse DOCX: {}", e), None)
+    })?;
+
+    // Extract text from paragraphs
+    let mut text_content = String::new();
+    let mut paragraph_count = 0;
+
+    for element in docx.document.children.iter() {
+        if let DocumentChild::Paragraph(p) = element {
+            let mut para_text = String::new();
+            for child in p.children.iter() {
+                if let docx_rs::ParagraphChild::Run(run) = child {
+                    for run_child in run.children.iter() {
+                        if let docx_rs::RunChild::Text(t) = run_child {
+                            para_text.push_str(&t.text);
+                        }
+                    }
+                }
+            }
+            if !para_text.trim().is_empty() {
+                text_content.push_str(&para_text);
+                text_content.push('\n');
+                paragraph_count += 1;
+            }
+        }
+    }
+
+    let output = if text_content.is_empty() {
+        formatdoc! {"
+            📝 DOCX: {path}
+            - File size: {size:.2} KB
+            - Text content: (no extractable text)
+            ",
+            path = path.display(),
+            size = file_size as f64 / 1024.0,
+        }
+    } else {
+        formatdoc! {"
+            📝 DOCX: {path}
+            - File size: {size:.2} KB
+            - Paragraphs: {count}
+
+            {content}
+            ",
+            path = path.display(),
+            size = file_size as f64 / 1024.0,
+            count = paragraph_count,
+            content = text_content.trim(),
+        }
+    };
+
+    Ok(vec![
+        Content::text(output.clone()).with_audience(vec![Role::Assistant]),
+        Content::text(output).with_audience(vec![Role::User]).with_priority(0.2),
+    ])
+}
+
+/// Reads XLSX/XLS file and extracts cell data as text
+async fn read_xlsx_file(path: &Path) -> Result<Vec<Content>, ErrorData> {
+    if !path.is_file() {
+        return Err(ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            format!("The path '{}' does not exist or is not accessible.", path.display()),
+            None,
+        ));
+    }
+
+    let file_size = std::fs::metadata(path)
+        .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("Failed to get file metadata: {}", e), None))?
+        .len();
+
+    if file_size > MAX_OFFICE_SIZE {
+        return Err(ErrorData::new(
+            ErrorCode::INTERNAL_ERROR,
+            format!("Excel file '{}' is too large ({:.2}MB). Maximum size is 50MB.", path.display(), file_size as f64 / 1024.0 / 1024.0),
+            None,
+        ));
+    }
+
+    let workbook = umya_spreadsheet::reader::xlsx::read(path).map_err(|e| {
+        ErrorData::new(ErrorCode::INTERNAL_ERROR, format!("Failed to read Excel file: {}", e), None)
+    })?;
+
+    let mut output = String::new();
+    let sheet_count = workbook.get_sheet_collection().len();
+
+    output.push_str(&format!("📊 Excel: {}\n", path.display()));
+    output.push_str(&format!("- File size: {:.2} KB\n", file_size as f64 / 1024.0));
+    output.push_str(&format!("- Sheets: {}\n\n", sheet_count));
+
+    for (idx, worksheet) in workbook.get_sheet_collection().iter().enumerate() {
+        let sheet_name = worksheet.get_name();
+        let max_row = worksheet.get_highest_row();
+        let max_col = worksheet.get_highest_column();
+
+        output.push_str(&format!("--- Sheet {}: \"{}\" ({}R x {}C) ---\n", idx + 1, sheet_name, max_row, max_col));
+
+        // Limit to first 100 rows for performance
+        let display_rows = std::cmp::min(max_row, 100);
+
+        for row in 1..=display_rows {
+            let mut row_values = Vec::new();
+            for col in 1..=max_col {
+                let value = if let Some(cell) = worksheet.get_cell((col, row)) {
+                    cell.get_value().into_owned()
+                } else {
+                    String::new()
+                };
+                row_values.push(value);
+            }
+            // Skip completely empty rows
+            if row_values.iter().all(|v| v.is_empty()) {
+                continue;
+            }
+            output.push_str(&row_values.join("\t"));
+            output.push('\n');
+        }
+
+        if max_row > 100 {
+            output.push_str(&format!("\n... ({} rows total, showing first 100)\n", max_row));
+        }
+        output.push('\n');
+    }
 
     Ok(vec![
         Content::text(output.clone()).with_audience(vec![Role::Assistant]),
