@@ -283,34 +283,36 @@ impl<'a> TuiApp<'a> {
                 if in_code_block {
                     // 코드 블록 종료
                     in_code_block = false;
-                    lines.push(Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled("└─────", md_styles.code),
-                    ]));
                 } else {
                     // 코드 블록 시작
                     in_code_block = true;
                     code_lang = lang;
-                    let header = if code_lang.is_empty() {
-                        "┌─────".to_string()
-                    } else {
-                        format!("┌─ {} ─", code_lang)
-                    };
-                    lines.push(Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled(header, md_styles.code),
-                    ]));
+                    if !code_lang.is_empty() {
+                        lines.push(Line::from(vec![
+                            Span::raw("   "),
+                            Span::styled(
+                                format!(" {} ", code_lang),
+                                md_styles.code,
+                            ),
+                        ]));
+                    }
                 }
                 continue;
             }
 
             if in_code_block {
-                // 코드 블록 내부: 구문 강조 적용
+                // 코드 블록 내부: 전체 줄에 배경색 적용
                 let mut code_spans = vec![
                     Span::raw("   "),
-                    Span::styled("│ ", md_styles.code),
+                    Span::styled("  ", md_styles.code_block),
                 ];
-                code_spans.extend(highlight_code_line(line, &code_lang));
+                // 구문 강조 span에도 코드블록 배경색 적용
+                let highlighted = highlight_code_line(line, &code_lang);
+                for span in highlighted {
+                    let mut style = span.style;
+                    style = style.bg(md_styles.code_block.bg.unwrap_or(ratatui::style::Color::Rgb(30, 30, 30)));
+                    code_spans.push(Span::styled(span.content.to_string(), style));
+                }
                 lines.push(Line::from(code_spans));
             } else {
                 // 일반 텍스트: 마크다운 렌더링

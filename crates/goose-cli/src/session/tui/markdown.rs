@@ -48,6 +48,7 @@ pub struct MdStyles {
     pub header1: Style,
     pub header2: Style,
     pub header3: Style,
+    pub header4: Style,
     pub list_marker: Style,
     pub quote: Style,
 }
@@ -64,6 +65,7 @@ impl Default for MdStyles {
             header1: Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
             header2: Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
             header3: Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            header4: Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             list_marker: Style::default().fg(Color::Yellow),
             quote: Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
         }
@@ -74,7 +76,13 @@ impl Default for MdStyles {
 pub fn parse_line(line: &str, styles: &MdStyles) -> Vec<Span<'static>> {
     let trimmed = line.trim_start();
 
-    // 헤더 체크
+    // 헤더 체크 (#### → ### → ## → # 순서로 체크)
+    if trimmed.starts_with("#### ") {
+        return vec![
+            Span::styled("#### ", styles.header4),
+            Span::styled(trimmed[5..].to_string(), styles.header4),
+        ];
+    }
     if trimmed.starts_with("### ") {
         return vec![
             Span::styled("### ", styles.header3),

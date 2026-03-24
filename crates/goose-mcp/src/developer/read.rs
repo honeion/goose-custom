@@ -221,7 +221,9 @@ async fn read_docx_file(path: &Path) -> Result<Vec<Content>, ErrorData> {
             - File size: {size:.2} KB
             - Paragraphs: {count}
 
+            ```
             {content}
+            ```
             ",
             path = path.display(),
             size = file_size as f64 / 1024.0,
@@ -274,11 +276,13 @@ async fn read_xlsx_file(path: &Path) -> Result<Vec<Content>, ErrorData> {
         let max_row = worksheet.get_highest_row();
         let max_col = worksheet.get_highest_column();
 
-        output.push_str(&format!("--- Sheet {}: \"{}\" ({}R x {}C) ---\n", idx + 1, sheet_name, max_row, max_col));
+        output.push_str(&format!("### Sheet {}: \"{}\" ({}R x {}C)\n\n", idx + 1, sheet_name, max_row, max_col));
 
         // Limit to first 100 rows for performance
         let display_rows = std::cmp::min(max_row, 100);
 
+        // Collect rows first to build markdown table
+        let mut table_rows: Vec<Vec<String>> = Vec::new();
         for row in 1..=display_rows {
             let mut row_values = Vec::new();
             for col in 1..=max_col {
@@ -293,8 +297,27 @@ async fn read_xlsx_file(path: &Path) -> Result<Vec<Content>, ErrorData> {
             if row_values.iter().all(|v| v.is_empty()) {
                 continue;
             }
-            output.push_str(&row_values.join("\t"));
+            table_rows.push(row_values);
+        }
+
+        // Render as markdown table
+        if !table_rows.is_empty() {
+            // Header row
+            output.push_str("| ");
+            output.push_str(&table_rows[0].join(" | "));
+            output.push_str(" |\n");
+            // Separator
+            output.push_str("|");
+            for _ in 0..max_col {
+                output.push_str("---|");
+            }
             output.push('\n');
+            // Data rows
+            for row in table_rows.iter().skip(1) {
+                output.push_str("| ");
+                output.push_str(&row.join(" | "));
+                output.push_str(" |\n");
+            }
         }
 
         if max_row > 100 {

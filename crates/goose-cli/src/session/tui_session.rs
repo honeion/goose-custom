@@ -179,16 +179,23 @@ async fn run_tui_loop(
         }
     }
 
-    loop {
-        // 스크롤 메트릭 업데이트 후 렌더링
-        let area = terminal.get_frame().area();
-        let total_lines = app.calculate_total_lines(area.width);
-        let viewport_height = area.height.saturating_sub(6); // 헤더, 도구상태, 입력, 상태바 제외
-        app.update_scroll_metrics(total_lines, viewport_height);
+    let mut needs_redraw = true;
 
-        terminal.draw(|frame| {
-            app.render(frame);
-        })?;
+    loop {
+        // 마우스 캡처 OFF + 스트리밍 안 할 때는 불필요한 리드로우 스킵
+        // (터미널 네이티브 텍스트 선택이 리셋되지 않도록)
+        let is_streaming = app.messages.last().map_or(false, |m| m.is_streaming);
+        if needs_redraw || app.mouse_capture || is_streaming {
+            let area = terminal.get_frame().area();
+            let total_lines = app.calculate_total_lines(area.width);
+            let viewport_height = area.height.saturating_sub(6);
+            app.update_scroll_metrics(total_lines, viewport_height);
+
+            terminal.draw(|frame| {
+                app.render(frame);
+            })?;
+            needs_redraw = false;
+        }
 
         // 이벤트 처리
         if event::poll(Duration::from_millis(50))? {
@@ -203,6 +210,7 @@ async fn run_tui_loop(
                     } else {
                         let _ = execute!(std::io::stdout(), DisableMouseCapture);
                     }
+                    needs_redraw = true;
                     continue;
                 }
 
@@ -242,6 +250,8 @@ async fn run_tui_loop(
             for change in config_changes {
                 apply_config_change(&change, session, &mut app).await;
             }
+
+            needs_redraw = true;
         }
 
         // 틱 업데이트
@@ -421,9 +431,15 @@ async fn process_agent_message(
                 break;
             }
             None => {
-                // 스트림 종료 - 마지막 메시지 언마스킹
+                // 스트림 종료 - 박스 문자 제거 + 언마스킹
                 if let Some(last_msg) = app.messages.last_mut() {
                     if last_msg.is_streaming {
+                        // 1. 박스 문자 제거
+                        let sanitized = sanitize_box_chars(&last_msg.content);
+                        if sanitized != last_msg.content {
+                            last_msg.content = sanitized;
+                        }
+                        // 2. PII 언마스킹
                         let unmasked_content = session.agent.unmask_pii(&last_msg.content).await;
                         if unmasked_content != last_msg.content {
                             tracing::debug!("TUI: PII 언마스킹 적용됨");
@@ -459,6 +475,34 @@ fn extract_text_content(message: &Message) -> String {
         }
     }
 
+    result
+}
+
+/// LLM 응답에서 Unicode 박스 문자 제거
+/// GPT-4o가 ┌─────/└─────/│ 로 감싸는 습관 교정
+fn sanitize_box_chars(text: &str) -> String {
+    let mut result = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // ┌ 또는 └ 로 시작하는 줄은 전부 제거 (테두리 줄)
+        if trimmed.starts_with('┌') || trimmed.starts_with('└') {
+            continue;
+        }
+        // │ 로 시작하는 줄에서 │ 접두사 제거
+        if trimmed.starts_with('│') {
+            let stripped = trimmed.trim_start_matches('│').trim_start();
+            // │ 뒤에 내용이 있으면 내용만, 없으면 빈 줄
+            if !stripped.is_empty() {
+                result.push_str(stripped);
+            }
+        } else {
+            result.push_str(line);
+        }
+        result.push('\n');
+    }
+    if result.ends_with('\n') {
+        result.pop();
+    }
     result
 }
 

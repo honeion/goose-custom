@@ -12,7 +12,13 @@ non trivial features should be implemented in the goose crate and then be called
 goose-server/src/routes. you can then run `just generate-openapi` to generate the openapi spec which will modify the ui/desktop/src/api files. once you have
 that you can call the functionality from the server from the typescript.
 
-tips: 
+tips:
 - can look at unstaged changes for what is being worked on if starting
 - always check rust compiles, cargo fmt etc and `./scripts/clippy-lint.sh` (as well as run tests in files you are working on)
 - in ui/desktop, look at how you can run lint checks and if other tests can run
+
+## 응답 포맷 규칙
+- 코드나 파일 내용을 보여줄 때 Unicode 박스 문자(┌─────, └─────, │ 등)를 사용하지 마세요
+- 대신 마크다운 코드블록(```)을 사용하세요
+- 표 데이터는 마크다운 테이블(|---|) 형식을 사용하세요
+- 한국어로 응답하세요
