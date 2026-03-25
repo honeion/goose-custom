@@ -176,7 +176,7 @@ impl<'a> TuiApp<'a> {
     }
 
     /// 대화 영역 렌더링
-    fn render_conversation(&self, frame: &mut Frame, area: Rect) {
+    fn render_conversation(&mut self, frame: &mut Frame, area: Rect) {
         if self.messages.is_empty() {
             // 빈 상태
             let empty_text = Paragraph::new(vec![
@@ -213,11 +213,80 @@ impl<'a> TuiApp<'a> {
             (self.scroll_state.offset as usize).min(total_lines.saturating_sub(viewport_height))
         };
 
-        let visible_lines: Vec<Line> = all_lines
+        // 대화 영역 좌표와 스크롤 오프셋 저장 (텍스트 선택용)
+        self.conversation_area_y = area.y;
+        self.conversation_scroll_offset = scroll_offset;
+
+        // plain text 캐시 (텍스트 선택 클립보드 추출용)
+        self.rendered_plain_lines = all_lines.iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect();
+
+        let mut visible_lines: Vec<Line> = all_lines
             .into_iter()
             .skip(scroll_offset)
             .take(viewport_height)
             .collect();
+
+        // 텍스트 선택 하이라이트 적용
+        if let Some(ref sel) = self.text_selection {
+            let (sr, sc) = (sel.start_row, sel.start_col);
+            let (er, ec) = (sel.end_row, sel.end_col);
+            let (from_row, from_col, to_row, to_col) = if sr < er || (sr == er && sc <= ec) {
+                (sr, sc, er, ec)
+            } else {
+                (er, ec, sr, sc)
+            };
+
+            let highlight_style = Style::default()
+                .bg(ratatui::style::Color::Rgb(70, 130, 180))
+                .fg(ratatui::style::Color::White);
+
+            for (vis_idx, line) in visible_lines.iter_mut().enumerate() {
+                let abs_row = scroll_offset + vis_idx;
+                if abs_row >= from_row && abs_row <= to_row {
+                    // 이 줄은 선택 범위에 포함
+                    let line_start = if abs_row == from_row { from_col } else { 0 };
+                    let line_end = if abs_row == to_row { to_col + 1 } else { usize::MAX };
+
+                    let mut new_spans = Vec::new();
+                    let mut col = 0usize;
+                    for span in line.spans.iter() {
+                        let span_text: Vec<char> = span.content.chars().collect();
+                        let span_len = span_text.len();
+                        let span_end = col + span_len;
+
+                        if span_end <= line_start || col >= line_end {
+                            // 선택 범위 밖
+                            new_spans.push(span.clone());
+                        } else {
+                            // 부분/전체 선택
+                            let sel_start = line_start.saturating_sub(col);
+                            let sel_end = (line_end - col).min(span_len);
+
+                            if sel_start > 0 {
+                                new_spans.push(Span::styled(
+                                    span_text[..sel_start].iter().collect::<String>(),
+                                    span.style,
+                                ));
+                            }
+                            new_spans.push(Span::styled(
+                                span_text[sel_start..sel_end].iter().collect::<String>(),
+                                highlight_style,
+                            ));
+                            if sel_end < span_len {
+                                new_spans.push(Span::styled(
+                                    span_text[sel_end..].iter().collect::<String>(),
+                                    span.style,
+                                ));
+                            }
+                        }
+                        col = span_end;
+                    }
+                    *line = Line::from(new_spans);
+                }
+            }
+        }
 
         let paragraph = Paragraph::new(visible_lines);
         frame.render_widget(paragraph, area);

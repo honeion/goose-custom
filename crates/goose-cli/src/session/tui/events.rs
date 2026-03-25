@@ -62,6 +62,12 @@ pub enum Action {
     ToggleAuditPanel,
     /// 설정 패널 토글 (F7)
     ToggleConfigPanel,
+    /// 마우스 드래그 선택 시작
+    SelectStart(u16, u16),
+    /// 마우스 드래그 선택 확장
+    SelectDrag(u16, u16),
+    /// 마우스 드래그 선택 종료 (클립보드 복사)
+    SelectEnd(u16, u16),
 }
 
 /// 업데이트 결과
@@ -256,6 +262,64 @@ impl<'a> TuiApp<'a> {
 
             Action::ToggleConfigPanel => {
                 self.config_panel.toggle();
+                UpdateResult::Continue
+            }
+
+            Action::SelectStart(x, y) => {
+                let row = (y as usize).saturating_sub(self.conversation_area_y as usize) + self.conversation_scroll_offset;
+                let col = x as usize;
+                self.text_selection = Some(super::app::TextSelection {
+                    start_row: row, start_col: col,
+                    end_row: row, end_col: col,
+                });
+                UpdateResult::Continue
+            }
+
+            Action::SelectDrag(x, y) => {
+                if let Some(ref mut sel) = self.text_selection {
+                    sel.end_row = (y as usize).saturating_sub(self.conversation_area_y as usize) + self.conversation_scroll_offset;
+                    sel.end_col = x as usize;
+                }
+                UpdateResult::Continue
+            }
+
+            Action::SelectEnd(_x, _y) => {
+                if let Some(ref sel) = self.text_selection {
+                    // 선택 영역에서 텍스트 추출
+                    let (sr, sc) = (sel.start_row, sel.start_col);
+                    let (er, ec) = (sel.end_row, sel.end_col);
+                    let (from_row, from_col, to_row, to_col) = if sr < er || (sr == er && sc <= ec) {
+                        (sr, sc, er, ec)
+                    } else {
+                        (er, ec, sr, sc)
+                    };
+
+                    let mut copied_text = String::new();
+                    for row in from_row..=to_row {
+                        if row < self.rendered_plain_lines.len() {
+                            let line = &self.rendered_plain_lines[row];
+                            let chars: Vec<char> = line.chars().collect();
+                            let start = if row == from_row { from_col.min(chars.len()) } else { 0 };
+                            let end = if row == to_row { (to_col + 1).min(chars.len()) } else { chars.len() };
+                            if start < end {
+                                copied_text.push_str(&chars[start..end].iter().collect::<String>());
+                            }
+                            if row < to_row {
+                                copied_text.push('\n');
+                            }
+                        }
+                    }
+
+                    if !copied_text.is_empty() {
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            let len = copied_text.len();
+                            if clipboard.set_text(copied_text).is_ok() {
+                                tracing::info!("클립보드 복사: {} chars", len);
+                            }
+                        }
+                    }
+                }
+                self.text_selection = None;
                 UpdateResult::Continue
             }
         }
@@ -577,11 +641,19 @@ pub fn event_to_action(event: Event, app: &mut TuiApp) -> Option<Action> {
             match mouse.kind {
                 MouseEventKind::ScrollUp => Some(Action::ScrollUp(3)),
                 MouseEventKind::ScrollDown => Some(Action::ScrollDown(3)),
-                // 왼쪽 클릭으로 패널 포커스 전환
+                // 왼쪽 클릭 → 선택 시작
                 MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
-                    Some(Action::MouseClick(mouse.column, mouse.row))
+                    Some(Action::SelectStart(mouse.column, mouse.row))
                 }
-                _ => None, // 드래그 등은 무시 (Shift+드래그로 텍스트 선택)
+                // 드래그 → 선택 확장
+                MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                    Some(Action::SelectDrag(mouse.column, mouse.row))
+                }
+                // 릴리즈 → 선택 종료 + 클립보드 복사
+                MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                    Some(Action::SelectEnd(mouse.column, mouse.row))
+                }
+                _ => None,
             }
         }
         Event::Paste(text) => {

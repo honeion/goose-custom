@@ -20,6 +20,17 @@ use super::markdown::{DiffStyles, is_diff_preview, parse_diff};
 use super::offscreen_buffer::{PanelId, PanelManager};
 use super::theme::Theme;
 
+/// 텍스트 선택 상태 (마우스 드래그)
+#[derive(Debug, Clone)]
+pub struct TextSelection {
+    /// 선택 시작 (화면 row, col)
+    pub start_row: usize,
+    pub start_col: usize,
+    /// 선택 끝 (화면 row, col)
+    pub end_row: usize,
+    pub end_col: usize,
+}
+
 /// 입력 모드 (Vim 스타일)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
@@ -309,6 +320,15 @@ pub struct TuiApp<'a> {
     // Hints 편집 패널 (F5)
     pub hints_panel: HintsPanel<'a>,
 
+    // 텍스트 선택 (마우스 드래그)
+    pub text_selection: Option<TextSelection>,
+    /// 렌더링된 대화 텍스트 캐시 (선택 영역 텍스트 추출용)
+    pub rendered_plain_lines: Vec<String>,
+    /// 대화 영역의 화면 좌표 (y 시작)
+    pub conversation_area_y: u16,
+    /// 대화 영역 스크롤 오프셋 (렌더링 시 저장)
+    pub conversation_scroll_offset: usize,
+
     // 감사 로그 패널 (F6)
     pub audit_panel: AuditPanel,
 
@@ -362,6 +382,11 @@ impl<'a> TuiApp<'a> {
 
             spinner: SpinnerFrames::new(),
             last_tick: Instant::now(),
+
+            text_selection: None,
+            rendered_plain_lines: Vec::new(),
+            conversation_area_y: 0,
+            conversation_scroll_offset: 0,
 
             hints_panel: HintsPanel::new(),
             audit_panel: AuditPanel::new(),
