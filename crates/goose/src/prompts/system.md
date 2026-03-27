@@ -121,7 +121,9 @@ Use Markdown formatting for all responses.
 ## Tool Usage Priority
 - Use dedicated tools instead of shell commands when available:
   - Use `text_editor` for file operations, NOT shell echo/cat/sed
-  - Use `analyze` for code understanding when available
+  - Use `read` to understand code — read key files (main, config, routers, models) directly
+  - Use `analyze` only when structural metrics are specifically needed (LOC counts, call graphs)
+  - For "analyze this project" requests: read entry points and core files, don't just list directory stats
 - When multiple tools can accomplish a task, prefer the more specific one.
 - Read files before modifying them to understand context.
 - When exploring directories, skip build artifacts and generated files:

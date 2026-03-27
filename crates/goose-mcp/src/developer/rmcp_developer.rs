@@ -452,8 +452,7 @@ impl ServerHandler for DeveloperServer {
                 If exact resource name is not found, search for similar names using grep/filter.
                 If multiple matches or uncertain, ask user to confirm which one they meant.
 
-                Leverage `analyze` through `return_last_only=true` subagents for deep codebase understanding with lean context
-                - delegate analysis, retain summaries
+                For code understanding, prefer `read` to read actual source files over `analyze` which only gives structural metrics.
 
                 Your windows/screen tools can be used for visual debugging. You should not use these tools unless
                 prompted to, but you can mention they are available if they are relevant.
@@ -1103,7 +1102,7 @@ impl DeveloperServer {
     /// For directories: Lists contents (files and subdirectories).
     #[tool(
         name = "read",
-        description = "Read a file or list directory contents. For files: returns content with line numbers. Use offset/limit for large files (over 2000 lines). For directories: lists contents."
+        description = "Read and understand code files. Returns full source content with line numbers. Use this to understand what code does — read main.py, config files, routers, models, etc. For directories: lists contents. Supports PDF, DOCX, XLSX, images. Use offset/limit for large files (over 2000 lines)."
     )]
     pub async fn read_tool(
         &self,
@@ -1631,7 +1630,7 @@ impl DeveloperServer {
     /// analyze(path="src/", focus="main") -> track main() across files in src/ down to max_depth subdirs
     #[tool(
         name = "analyze",
-        description = "Analyze code structure in 3 modes: 1) Directory overview - file tree with LOC/function/class counts to max_depth. 2) File details - functions, classes, imports. 3) Symbol focus - call graphs across directory to max_depth (requires directory path, case-sensitive). Typical flow: directory → files → symbols. Functions called >3x show •N."
+        description = "Generate structural metrics: LOC counts, function/class listings, call graphs. Use only when metrics or call graphs are specifically needed. For general code understanding, use `read` to read the actual source files instead."
     )]
     pub async fn analyze(
         &self,

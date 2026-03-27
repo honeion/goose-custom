@@ -17,6 +17,13 @@ tips:
 - always check rust compiles, cargo fmt etc and `./scripts/clippy-lint.sh` (as well as run tests in files you are working on)
 - in ui/desktop, look at how you can run lint checks and if other tests can run
 
+## 코드 분석 규칙 (중요)
+- analyze 도구로 파일 목록/통계만 보고 끝내지 마세요. 반드시 read 도구로 핵심 파일을 직접 읽으세요
+- "분석해봐" = main.py, config.py, 라우터, 모델 등 핵심 파일을 read로 열어서 코드를 읽고 동작을 설명하라는 뜻입니다
+- 파일명만 보고 "orchestrator.py: 오케스트레이션 로직" 같은 파일명 번역 금지
+- 분석 순서: (1) 엔트리포인트(main.py) 읽기 (2) 설정/라우터 읽기 (3) 핵심 비즈니스 로직 읽기 (4) 요약
+- 파일 형식 분포(Python 95%, YAML 5%)는 쓸모없으니 언급하지 마세요
+
 ## 응답 포맷 규칙
 - 코드나 파일 내용을 보여줄 때 Unicode 박스 문자(┌─────, └─────, │ 등)를 사용하지 마세요
 - 대신 마크다운 코드블록(```)을 사용하세요
