@@ -267,7 +267,7 @@ impl<'a> TuiApp<'a> {
 
             Action::SelectStart(x, y) => {
                 let row = (y as usize).saturating_sub(self.conversation_area_y as usize) + self.conversation_scroll_offset;
-                let col = x as usize;
+                let col = (x as usize).saturating_sub(self.conversation_area_x as usize);
                 self.text_selection = Some(super::app::TextSelection {
                     start_row: row, start_col: col,
                     end_row: row, end_col: col,
@@ -278,7 +278,7 @@ impl<'a> TuiApp<'a> {
             Action::SelectDrag(x, y) => {
                 if let Some(ref mut sel) = self.text_selection {
                     sel.end_row = (y as usize).saturating_sub(self.conversation_area_y as usize) + self.conversation_scroll_offset;
-                    sel.end_col = x as usize;
+                    sel.end_col = (x as usize).saturating_sub(self.conversation_area_x as usize);
                 }
                 UpdateResult::Continue
             }

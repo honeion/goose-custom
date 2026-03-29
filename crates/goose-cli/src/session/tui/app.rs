@@ -325,6 +325,7 @@ pub struct TuiApp<'a> {
     /// 렌더링된 대화 텍스트 캐시 (선택 영역 텍스트 추출용)
     pub rendered_plain_lines: Vec<String>,
     /// 대화 영역의 화면 좌표 (y 시작)
+    pub conversation_area_x: u16,
     pub conversation_area_y: u16,
     /// 대화 영역 스크롤 오프셋 (렌더링 시 저장)
     pub conversation_scroll_offset: usize,
@@ -385,6 +386,7 @@ impl<'a> TuiApp<'a> {
 
             text_selection: None,
             rendered_plain_lines: Vec::new(),
+            conversation_area_x: 0,
             conversation_area_y: 0,
             conversation_scroll_offset: 0,
 

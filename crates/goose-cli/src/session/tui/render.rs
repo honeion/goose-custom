@@ -229,6 +229,7 @@ impl<'a> TuiApp<'a> {
         };
 
         // 대화 영역 좌표와 스크롤 오프셋 저장 (텍스트 선택용)
+        self.conversation_area_x = area.x;
         self.conversation_area_y = area.y;
         self.conversation_scroll_offset = scroll_offset;
 
