@@ -163,10 +163,25 @@ impl<'a> TuiApp<'a> {
         let status = if self.is_connected { "●" } else { "○" };
         let status_style = if self.is_connected { self.theme.success } else { self.theme.error };
 
+        let cwd = std::env::current_dir()
+            .map(|p| {
+                // 경로가 길면 마지막 2단계만 표시
+                let components: Vec<_> = p.components().collect();
+                if components.len() > 2 {
+                    let last_two: std::path::PathBuf = components[components.len()-2..].iter().collect();
+                    format!(".../{}", last_two.display())
+                } else {
+                    p.display().to_string()
+                }
+            })
+            .unwrap_or_default();
+
         let header = Line::from(vec![
             Span::styled(format!(" {} Goose ", icons::GOOSE), self.theme.header),
             Span::styled(status, status_style),
             Span::styled(format!(" {} ", self.model_name), self.theme.muted),
+            Span::styled("│ ", self.theme.border),
+            Span::styled(format!(" {} ", cwd), self.theme.dimmed),
             Span::styled("│ ", self.theme.border),
             Span::styled("/help", self.theme.dimmed),
         ]);

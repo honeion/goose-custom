@@ -372,8 +372,26 @@ async fn process_agent_message(
                 for content in &message.content {
                     match content {
                         MessageContent::ToolRequest(req) => {
-                            app.push_tool_text(&format!("▶ {}", req.to_readable_string()));
-                            app.start_tool(req.to_readable_string().split('(').next().unwrap_or("tool").to_string());
+                            let tool_desc = req.to_readable_string();
+                            app.push_tool_text(&format!("▶ {}", tool_desc));
+                            let tool_name = tool_desc.split('(').next().unwrap_or("tool").to_string();
+
+                            // delegate(서브에이전트) 호출 시 대화창에 진행 상태 표시
+                            if tool_name == "delegate" {
+                                let source = tool_desc
+                                    .split("source:")
+                                    .nth(1)
+                                    .and_then(|s| s.split(',').next())
+                                    .map(|s| s.trim().trim_matches('"').trim_matches('\''))
+                                    .unwrap_or("subagent");
+                                if let Some(last_msg) = app.messages.last_mut() {
+                                    if last_msg.is_streaming {
+                                        last_msg.content.push_str(&format!("\n🔄 `{}` 서브에이전트 분석 중...\n", source));
+                                    }
+                                }
+                            }
+
+                            app.start_tool(tool_name);
                         }
                         MessageContent::ToolResponse(res) => {
                             let output = match &res.tool_result {
@@ -830,6 +848,25 @@ fn handle_mcp_notification(
                         .unwrap_or("unknown");
                     app.push_tool_text(&format!("▶ {} ({})", tool_name, ext_id));
                     app.start_tool(tool_name.to_string());
+
+                    // 서브에이전트 진행 상태를 대화창에도 표시
+                    if let Some(last_msg) = app.messages.last_mut() {
+                        if last_msg.is_streaming {
+                            if tool_name.contains("read") {
+                                let path = tool_call.get("path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let short_path = path.rsplit('/').next()
+                                    .or_else(|| path.rsplit('\\').next())
+                                    .unwrap_or(path);
+                                last_msg.content.push_str(&format!("  📖 reading `{}`...\n", short_path));
+                            } else if tool_name.contains("glob") {
+                                last_msg.content.push_str("  🔍 scanning files...\n");
+                            } else if tool_name.contains("grep") {
+                                last_msg.content.push_str("  🔎 searching code...\n");
+                            }
+                        }
+                    }
                 }
                 // 일반 로그 메시지
                 else if let Some(msg) = obj.get("message").and_then(|v| v.as_str()) {
