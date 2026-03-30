@@ -938,7 +938,7 @@ async fn detect_and_augment_intent(content: &str) -> String {
         let mut files = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') && name != ".env.example" {
+            if name.starts_with('.') {
                 continue;
             }
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
@@ -958,10 +958,10 @@ async fn detect_and_augment_intent(content: &str) -> String {
     let doc_files = ["README.md", "CLAUDE.md", "readme.md"];
     let dep_files = ["requirements.txt", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.xml"];
     let entry_files = ["main.py", "app.py", "manage.py", "main.rs", "lib.rs", "index.ts", "app.ts", "main.go", "Main.java"];
-    let config_files = ["config.py", "settings.py", "config.ts", "config.rs", ".env.example"];
+    let config_files = ["config.py", "settings.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"];
 
     let mut read_count = 0;
-    let max_reads = 8;
+    let max_reads = 12;
     let max_lines_per_file = 150;
 
     // 문서 파일
@@ -1012,6 +1012,37 @@ async fn detect_and_augment_intent(content: &str) -> String {
                 let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                 context_parts.push(format!("## {} (설정)\n```\n{}\n```", rel_path.display(), truncated));
                 read_count += 1;
+            }
+        }
+    }
+
+    // 2.5. 라우터/서비스/모델 자동 탐색 (패턴 기반)
+    let code_patterns = [
+        ("routes", "라우터/API"),
+        ("router", "라우터/API"),
+        ("api", "라우터/API"),
+        ("services", "서비스/비즈니스 로직"),
+        ("service", "서비스/비즈니스 로직"),
+        ("models", "데이터 모델"),
+        ("model", "데이터 모델"),
+        ("schemas", "스키마"),
+        ("orchestrator", "오케스트레이터"),
+        ("handlers", "핸들러"),
+        ("middleware", "미들웨어"),
+    ];
+
+    for (dir_name, label) in &code_patterns {
+        if read_count >= max_reads { break; }
+        // 2 depth까지 해당 이름의 디렉토리 찾기
+        if let Some(dir_path) = find_dir_recursive(base, dir_name, 3) {
+            // 디렉토리 안에서 가장 큰 파일 하나 읽기
+            if let Some(biggest) = find_biggest_file(&dir_path) {
+                if let Ok(content) = std::fs::read_to_string(&biggest) {
+                    let rel_path = biggest.strip_prefix(base).unwrap_or(&biggest);
+                    let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} — {} (핵심 코드)\n```\n{}\n```", rel_path.display(), label, truncated));
+                    read_count += 1;
+                }
             }
         }
     }
@@ -1077,6 +1108,56 @@ fn extract_path_from_message(content: &str) -> Option<String> {
 /// 파일 재귀 검색 (최대 depth)
 fn find_file_recursive(base: &std::path::Path, name: &str, max_depth: usize) -> Option<std::path::PathBuf> {
     find_file_recursive_inner(base, name, 0, max_depth)
+}
+
+/// 디렉토리 재귀 검색
+fn find_dir_recursive(base: &std::path::Path, name: &str, max_depth: usize) -> Option<std::path::PathBuf> {
+    find_dir_recursive_inner(base, name, 0, max_depth)
+}
+
+fn find_dir_recursive_inner(dir: &std::path::Path, name: &str, depth: usize, max_depth: usize) -> Option<std::path::PathBuf> {
+    if depth > max_depth { return None; }
+    let skip = ["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build"];
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if skip.contains(&dir_name.as_str()) { continue; }
+                if dir_name == name {
+                    return Some(entry.path());
+                }
+                if let Some(found) = find_dir_recursive_inner(&entry.path(), name, depth + 1, max_depth) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 디렉토리에서 가장 큰 .py/.rs/.ts/.js/.go/.java 파일 찾기
+fn find_biggest_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let code_exts = ["py", "rs", "ts", "js", "go", "java", "kt", "rb"];
+    let mut biggest: Option<(std::path::PathBuf, u64)> = None;
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() { continue; }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !code_exts.contains(&ext) { continue; }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("__") || name.starts_with("test_") { continue; }
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let size = meta.len();
+                if biggest.as_ref().map_or(true, |(_, s)| size > *s) {
+                    biggest = Some((path, size));
+                }
+            }
+        }
+    }
+    biggest.map(|(p, _)| p)
 }
 
 fn find_file_recursive_inner(dir: &std::path::Path, name: &str, depth: usize, max_depth: usize) -> Option<std::path::PathBuf> {
