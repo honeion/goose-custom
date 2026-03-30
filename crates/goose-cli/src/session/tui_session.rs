@@ -939,8 +939,8 @@ async fn collect_context_with_progress(
 
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
-    let max_reads = 12;
-    let max_lines_per_file = 60;
+    let max_reads = 6;
+    let max_lines_per_file = 40;
 
     // === Step 1: 프로젝트 트리 ===
     step += 1;
@@ -1177,8 +1177,8 @@ async fn detect_and_augment_intent(content: &str) -> String {
     let config_files = ["config.py", "settings.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"];
 
     let mut read_count = 0;
-    let max_reads = 12;
-    let max_lines_per_file = 60;
+    let max_reads = 6;
+    let max_lines_per_file = 40;
 
     // 문서 파일
     for name in &doc_files {
