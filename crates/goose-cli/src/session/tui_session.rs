@@ -933,7 +933,9 @@ async fn collect_context_with_progress(
         .unwrap_or("project");
 
     // 진행 메시지 인덱스 기억
-    app.add_system_message(format!("🔍 {} 프로젝트 정보 수집 시작...", short_name));
+    let total_steps = 7;
+    let mut step = 0;
+    app.add_system_message(make_progress_bar(0, total_steps, &format!("{} 분석 준비", short_name)));
     terminal.draw(|frame| app.render(frame))?;
     let progress_idx = app.messages.len() - 1;
 
@@ -943,7 +945,8 @@ async fn collect_context_with_progress(
     let max_lines_per_file = 150;
 
     // === Step 1: 프로젝트 트리 ===
-    update_progress(app, terminal, progress_idx, &format!("🔍 {} 디렉토리 구조 스캔...", short_name))?;
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "디렉토리 구조 스캔"))?;
     if let Ok(entries) = std::fs::read_dir(base) {
         let mut dirs = Vec::new();
         let mut files = Vec::new();
@@ -964,12 +967,13 @@ async fn collect_context_with_progress(
     }
 
     // === Step 2: 문서 파일 ===
+    step += 1;
     let doc_files = ["README.md", "CLAUDE.md", "readme.md"];
     for name in &doc_files {
         if read_count >= max_reads { break; }
         let file_path = base.join(name);
         if file_path.exists() {
-            update_progress(app, terminal, progress_idx, &format!("📖 {} 읽는 중...", name))?;
+            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
             if let Ok(file_content) = std::fs::read_to_string(&file_path) {
                 let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                 context_parts.push(format!("## {} (문서)\n```\n{}\n```", name, truncated));
@@ -979,12 +983,13 @@ async fn collect_context_with_progress(
     }
 
     // === Step 3: 의존성 파일 ===
+    step += 1;
     let dep_files = ["requirements.txt", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.xml"];
     for name in &dep_files {
         if read_count >= max_reads { break; }
         let file_path = base.join(name);
         if file_path.exists() {
-            update_progress(app, terminal, progress_idx, &format!("📦 {} 읽는 중...", name))?;
+            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
             if let Ok(file_content) = std::fs::read_to_string(&file_path) {
                 let truncated: String = file_content.lines().take(80).collect::<Vec<_>>().join("\n");
                 context_parts.push(format!("## {} (의존성)\n```\n{}\n```", name, truncated));
@@ -994,12 +999,13 @@ async fn collect_context_with_progress(
     }
 
     // === Step 4: 엔트리포인트 ===
+    step += 1;
     let entry_files = ["main.py", "app.py", "manage.py", "main.rs", "lib.rs", "index.ts", "app.ts", "main.go", "Main.java"];
     for name in &entry_files {
         if read_count >= max_reads { break; }
         if let Some(found) = find_file_recursive(base, name, 3) {
             let rel_path = found.strip_prefix(base).unwrap_or(&found);
-            update_progress(app, terminal, progress_idx, &format!("🚀 {} 읽는 중...", rel_path.display()))?;
+            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
             if let Ok(file_content) = std::fs::read_to_string(&found) {
                 let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                 context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
@@ -1009,12 +1015,13 @@ async fn collect_context_with_progress(
     }
 
     // === Step 5: 설정 파일 ===
+    step += 1;
     let config_files = ["config.py", "settings.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"];
     for name in &config_files {
         if read_count >= max_reads { break; }
         if let Some(found) = find_file_recursive(base, name, 3) {
             let rel_path = found.strip_prefix(base).unwrap_or(&found);
-            update_progress(app, terminal, progress_idx, &format!("⚙️ {} 읽는 중...", rel_path.display()))?;
+            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
             if let Ok(file_content) = std::fs::read_to_string(&found) {
                 let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                 context_parts.push(format!("## {} (설정)\n```\n{}\n```", rel_path.display(), truncated));
@@ -1024,6 +1031,7 @@ async fn collect_context_with_progress(
     }
 
     // === Step 6: 핵심 코드 디렉토리 ===
+    step += 1;
     let code_patterns = [
         ("routes", "라우터/API"), ("router", "라우터/API"), ("api", "라우터/API"),
         ("services", "서비스"), ("service", "서비스"),
@@ -1035,7 +1043,7 @@ async fn collect_context_with_progress(
         if let Some(dir_path) = find_dir_recursive(base, dir_name, 3) {
             if let Some(biggest) = find_biggest_file(&dir_path) {
                 let rel_path = biggest.strip_prefix(base).unwrap_or(&biggest);
-                update_progress(app, terminal, progress_idx, &format!("🔎 {} 읽는 중...", rel_path.display()))?;
+                update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
                 if let Ok(file_content) = std::fs::read_to_string(&biggest) {
                     let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                     context_parts.push(format!("## {} — {} (핵심 코드)\n```\n{}\n```", rel_path.display(), label, truncated));
@@ -1046,7 +1054,8 @@ async fn collect_context_with_progress(
     }
 
     // === Step 7: Git 상태 ===
-    update_progress(app, terminal, progress_idx, "📋 Git 상태 확인...")?;
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Git 상태 확인"))?;
     if let Ok(output) = std::process::Command::new("git")
         .args(["log", "--oneline", "-5"])
         .current_dir(base).output()
@@ -1068,7 +1077,7 @@ async fn collect_context_with_progress(
 
     // === 완료 ===
     update_progress(app, terminal, progress_idx,
-        &format!("✅ {} 파일 수집 완료 — AI 분석 요청 중...", read_count))?;
+        &format!("◉ ━━━━━━━━━━━━━━━━━━━━ [100%] {}/{} — {}개 파일 수집 완료, AI 분석 중...", total_steps, total_steps, read_count))?;
 
     if context_parts.is_empty() {
         return Ok(content.to_string());
@@ -1092,6 +1101,21 @@ fn update_progress(
     }
     terminal.draw(|frame| app.render(frame))?;
     Ok(())
+}
+
+/// 프로그레스 바 생성
+fn make_progress_bar(current: usize, total: usize, step_name: &str) -> String {
+    let pct = if total > 0 { current * 100 / total } else { 0 };
+    let filled = current * 20 / total.max(1);
+    let empty = 20 - filled;
+    let bar = format!("{}{}", "━".repeat(filled), "─".repeat(empty));
+    let spinner = match current % 4 {
+        0 => "◐",
+        1 => "◓",
+        2 => "◑",
+        _ => "◒",
+    };
+    format!("{} {} [{}] {}/{} — {}", spinner, bar, pct, current, total, step_name)
 }
 
 /// 사용자 메시지에서 intent 감지 + 프로젝트 컨텍스트 자동 수집 (하위 호환용)
