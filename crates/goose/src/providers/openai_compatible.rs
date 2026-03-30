@@ -121,7 +121,11 @@ impl Provider for OpenAiCompatibleProvider {
                 .map(|m| m.as_concat_text())
                 .unwrap_or_default();
             let preview = if message_preview.len() > 200 {
-                format!("{}...", &message_preview[..200])
+                let mut end = 200;
+                while end > 0 && !message_preview.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &message_preview[..end])
             } else {
                 message_preview
             };
