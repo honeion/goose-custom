@@ -146,15 +146,7 @@ async fn run_tui_loop(
         }
     }
 
-    // 환영 메시지
-    let welcome_msg = if app.pii_masking_enabled {
-        "Goose Custom TUI 세션이 시작되었습니다. 🔒 민감정보 보호 활성화".to_string()
-    } else {
-        "Goose Custom TUI 세션이 시작되었습니다.".to_string()
-    };
-    app.add_system_message(welcome_msg);
-
-    // Hints 요약 표시
+    // 환영 메시지 + Hints 요약 통합 표시
     let hints_filenames = vec![
         GOOSE_HINTS_FILENAME.to_string(),
         GOOSE_HINTS_LOCAL_FILENAME.to_string(),
@@ -162,10 +154,16 @@ async fn run_tui_loop(
     ];
     let cwd = std::env::current_dir().unwrap_or_default();
     let hints_metadata = get_hints_metadata(&cwd, &hints_filenames);
+
+    let mut startup_msg = if app.pii_masking_enabled {
+        "Goose Custom TUI 세션이 시작되었습니다. 🔒 민감정보 보호 활성화".to_string()
+    } else {
+        "Goose Custom TUI 세션이 시작되었습니다.".to_string()
+    };
     if !hints_metadata.is_empty() {
-        let hints_summary = format_hints_summary(&hints_metadata);
-        app.add_system_message(hints_summary);
+        startup_msg.push_str(&format!("\n{}", format_hints_summary(&hints_metadata)));
     }
+    app.add_system_message(startup_msg);
 
     // 기존 메시지 히스토리 로드
     for msg in &session.messages {
@@ -942,7 +940,7 @@ async fn collect_context_with_progress(
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
     let max_reads = 12;
-    let max_lines_per_file = 150;
+    let max_lines_per_file = 60;
 
     // === Step 1: 프로젝트 트리 ===
     step += 1;
@@ -1180,7 +1178,7 @@ async fn detect_and_augment_intent(content: &str) -> String {
 
     let mut read_count = 0;
     let max_reads = 12;
-    let max_lines_per_file = 150;
+    let max_lines_per_file = 60;
 
     // 문서 파일
     for name in &doc_files {
