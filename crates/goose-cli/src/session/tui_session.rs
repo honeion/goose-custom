@@ -232,10 +232,13 @@ async fn run_tui_loop(
                                 continue;
                             }
 
+                            // intent 감지 + 컨텍스트 자동 수집
+                            let augmented_content = detect_and_augment_intent(&content).await;
+
                             // 에이전트에 메시지 전송 및 응답 처리
                             process_agent_message(
                                 session,
-                                &content,
+                                &augmented_content,
                                 &mut app,
                                 terminal,
                             ).await?;
@@ -897,6 +900,209 @@ fn handle_mcp_notification(
 
 /// 도구 출력에서 SUMMARY 부분만 추출
 /// 상세 파일 목록 등은 제외하고 요약만 표시
+/// 사용자 메시지에서 intent 감지 + 프로젝트 컨텍스트 자동 수집
+async fn detect_and_augment_intent(content: &str) -> String {
+    // "분석" intent 감지
+    let analyze_keywords = ["분석", "analyze", "설명해", "파악", "이해", "살펴", "inspect"];
+    let is_analyze = analyze_keywords.iter().any(|kw| content.contains(kw));
+
+    if !is_analyze {
+        return content.to_string();
+    }
+
+    // 경로 추출 (Windows/Unix)
+    let path = extract_path_from_message(content);
+    let project_path = match path {
+        Some(p) if std::path::Path::new(&p).is_dir() => p,
+        _ => {
+            // 경로 없으면 현재 디렉토리
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }
+    };
+
+    if project_path.is_empty() {
+        return content.to_string();
+    }
+
+    tracing::info!("Intent 감지: 프로젝트 분석 ({})", project_path);
+
+    // 컨텍스트 자동 수집
+    let mut context_parts: Vec<String> = Vec::new();
+    let base = std::path::Path::new(&project_path);
+
+    // 1. 프로젝트 트리 (1 depth)
+    if let Ok(entries) = std::fs::read_dir(base) {
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') && name != ".env.example" {
+                continue;
+            }
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if !["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build"].contains(&name.as_str()) {
+                    dirs.push(format!("  {}/", name));
+                }
+            } else {
+                files.push(format!("  {}", name));
+            }
+        }
+        dirs.sort();
+        files.sort();
+        context_parts.push(format!("## 프로젝트 트리\n```\n{}\n{}\n```", dirs.join("\n"), files.join("\n")));
+    }
+
+    // 2. 핵심 파일 자동 읽기
+    let doc_files = ["README.md", "CLAUDE.md", "readme.md"];
+    let dep_files = ["requirements.txt", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.xml"];
+    let entry_files = ["main.py", "app.py", "manage.py", "main.rs", "lib.rs", "index.ts", "app.ts", "main.go", "Main.java"];
+    let config_files = ["config.py", "settings.py", "config.ts", "config.rs", ".env.example"];
+
+    let mut read_count = 0;
+    let max_reads = 8;
+    let max_lines_per_file = 150;
+
+    // 문서 파일
+    for name in &doc_files {
+        if read_count >= max_reads { break; }
+        let file_path = base.join(name);
+        if file_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (자동 읽기)\n```\n{}\n```", name, truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // 의존성 파일
+    for name in &dep_files {
+        if read_count >= max_reads { break; }
+        let file_path = base.join(name);
+        if file_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&file_path) {
+                let truncated: String = content.lines().take(80).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (의존성)\n```\n{}\n```", name, truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // 엔트리포인트 — 재귀 검색 (최대 2 depth)
+    for name in &entry_files {
+        if read_count >= max_reads { break; }
+        if let Some(found) = find_file_recursive(base, name, 3) {
+            if let Ok(content) = std::fs::read_to_string(&found) {
+                let rel_path = found.strip_prefix(base).unwrap_or(&found);
+                let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // 설정 파일 — 재귀 검색
+    for name in &config_files {
+        if read_count >= max_reads { break; }
+        if let Some(found) = find_file_recursive(base, name, 3) {
+            if let Ok(content) = std::fs::read_to_string(&found) {
+                let rel_path = found.strip_prefix(base).unwrap_or(&found);
+                let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (설정)\n```\n{}\n```", rel_path.display(), truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // 3. Git 상태
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["log", "--oneline", "-5"])
+        .current_dir(base)
+        .output()
+    {
+        if output.status.success() {
+            let log = String::from_utf8_lossy(&output.stdout);
+            context_parts.push(format!("## Git 최근 커밋\n```\n{}\n```", log.trim()));
+        }
+    }
+
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(base)
+        .output()
+    {
+        if output.status.success() {
+            let branch = String::from_utf8_lossy(&output.stdout);
+            context_parts.push(format!("현재 브랜치: `{}`", branch.trim()));
+        }
+    }
+
+    if context_parts.is_empty() {
+        return content.to_string();
+    }
+
+    // 원본 메시지 + 수집된 컨텍스트를 합쳐서 LLM에 전달
+    format!(
+        "{}\n\n---\n\n# 자동 수집된 프로젝트 정보 ({}개 파일 읽음)\n\n아래 정보를 바탕으로 프로젝트를 분석해주세요.\n요약 위주로 설명하고, 핵심 아키텍처와 데이터 흐름을 파악해주세요.\n\n{}\n",
+        content,
+        read_count,
+        context_parts.join("\n\n")
+    )
+}
+
+/// 메시지에서 경로 추출
+fn extract_path_from_message(content: &str) -> Option<String> {
+    // Windows 경로 (C:\... 또는 C:/...)
+    if let Some(caps) = regex::Regex::new(r"([A-Za-z]:[/\\][^\s]+)")
+        .ok()
+        .and_then(|re| re.find(content))
+    {
+        return Some(caps.as_str().to_string());
+    }
+    // Unix 경로
+    if let Some(caps) = regex::Regex::new(r"(/[^\s]+)")
+        .ok()
+        .and_then(|re| re.find(content))
+    {
+        let path = caps.as_str();
+        if path.len() > 2 {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
+/// 파일 재귀 검색 (최대 depth)
+fn find_file_recursive(base: &std::path::Path, name: &str, max_depth: usize) -> Option<std::path::PathBuf> {
+    find_file_recursive_inner(base, name, 0, max_depth)
+}
+
+fn find_file_recursive_inner(dir: &std::path::Path, name: &str, depth: usize, max_depth: usize) -> Option<std::path::PathBuf> {
+    if depth > max_depth { return None; }
+
+    let direct = dir.join(name);
+    if direct.exists() {
+        return Some(direct);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if ["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build"].contains(&dir_name.as_str()) {
+                    continue;
+                }
+                if let Some(found) = find_file_recursive_inner(&entry.path(), name, depth + 1, max_depth) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn extract_tool_summary(output: &str) -> String {
     // 일반적인 상세 목록 시작 패턴들
     let cutoff_patterns = [
