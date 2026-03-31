@@ -965,7 +965,7 @@ async fn collect_context_with_progress(
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with('.') { continue; }
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if !["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build"].contains(&name.as_str()) {
+                if !["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build", "scripts", "tests", "docs", "patches", "static", "data"].contains(&name.as_str()) {
                     dirs.push(format!("  {}/", name));
                 }
             } else {
@@ -1171,7 +1171,7 @@ async fn detect_and_augment_intent(content: &str) -> String {
                 continue;
             }
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if !["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build"].contains(&name.as_str()) {
+                if !["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build", "scripts", "tests", "docs", "patches", "static", "data"].contains(&name.as_str()) {
                     dirs.push(format!("  {}/", name));
                 }
             } else {
@@ -1346,7 +1346,7 @@ fn find_dir_recursive(base: &std::path::Path, name: &str, max_depth: usize) -> O
 
 fn find_dir_recursive_inner(dir: &std::path::Path, name: &str, depth: usize, max_depth: usize) -> Option<std::path::PathBuf> {
     if depth > max_depth { return None; }
-    let skip = ["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build"];
+    let skip = ["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build", "scripts", "tests", "docs", "patches", "static", "data"];
 
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -1401,7 +1401,7 @@ fn find_file_recursive_inner(dir: &std::path::Path, name: &str, depth: usize, ma
         for entry in entries.flatten() {
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 let dir_name = entry.file_name().to_string_lossy().to_string();
-                if ["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build"].contains(&dir_name.as_str()) {
+                if ["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build", "scripts", "tests", "docs", "patches", "static", "data"].contains(&dir_name.as_str()) {
                     continue;
                 }
                 if let Some(found) = find_file_recursive_inner(&entry.path(), name, depth + 1, max_depth) {
