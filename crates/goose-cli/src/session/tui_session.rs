@@ -230,10 +230,23 @@ async fn run_tui_loop(
                                 continue;
                             }
 
-                            // intent 감지 + 컨텍스트 자동 수집 (진행 표시 포함)
-                            let augmented_content = collect_context_with_progress(
+                            // intent 감지 + 컨텍스트 자동 수집 → 시스템 프롬프트에 주입
+                            let project_context = collect_context_with_progress(
                                 &content, &mut app, terminal,
                             ).await?;
+
+                            // 수집된 컨텍스트가 있으면 시스템 프롬프트에 주입 (사용자 메시지는 원본 유지)
+                            if project_context != content {
+                                let context_only = project_context
+                                    .strip_prefix(&content)
+                                    .unwrap_or(&project_context)
+                                    .to_string();
+                                session.agent.add_system_context(
+                                    "project_analysis_context".to_string(),
+                                    context_only,
+                                ).await;
+                            }
+                            let augmented_content = content.clone();
 
                             // 에이전트에 메시지 전송 및 응답 처리
                             process_agent_message(

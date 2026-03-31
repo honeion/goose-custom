@@ -349,6 +349,12 @@ impl Agent {
         masker.get_disabled_types()
     }
 
+    /// 시스템 프롬프트에 추가 컨텍스트 주입
+    pub async fn add_system_context(&self, key: String, context: String) {
+        let mut pm = self.prompt_manager.lock().await;
+        pm.add_system_prompt_extra(key, context);
+    }
+
     /// Message의 텍스트 콘텐츠 마스킹
     pub async fn mask_message(&self, message: &Message) -> Message {
         self.mask_message_with_info(message).await.0
