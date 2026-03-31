@@ -70,10 +70,10 @@ impl UserIntent {
     /// Intent별 TASK 지시문
     fn task_instruction(&self) -> &'static str {
         match self {
-            UserIntent::Analyze => "위에 수집된 실제 코드 내용만을 기반으로 분석해주세요. 절대로 코드를 추측하거나 지어내지 마세요. 수집된 파일에 없는 함수나 클래스를 언급하지 마세요. 이 프로젝트가 무엇을 하는 시스템인지, 핵심 아키텍처, 데이터 흐름, 주요 모듈의 역할을 한국어로 요약해주세요.",
-            UserIntent::Debug => "위에 수집된 실제 컨텍스트만을 기반으로 문제의 원인을 분석해주세요. 존재하지 않는 코드나 에러를 지어내지 마세요. 코드상으로 원인을 특정하기 어려우면, 수집된 환경 설정(docker-compose, k8s manifest 등)을 참고하여 kubectl logs 등 런타임 로그 확인을 시도해주세요.",
-            UserIntent::Modify => "위에 수집된 실제 파일 내용만을 기반으로 분석해주세요. 수집되지 않은 코드를 추측하지 마세요. 파일의 구조와 import 관계를 파악하고, 수정 방안을 제시해주세요.",
-            UserIntent::Deploy => "위에 수집된 실제 인프라 설정 파일만을 기반으로 분석해주세요. 수집되지 않은 설정 파일의 내용을 지어내지 마세요. Dockerfile, CI/CD, k8s manifest를 기반으로 현재 배포 파이프라인을 설명해주세요.",
+            UserIntent::Analyze => "위에 수집된 실제 코드 내용만을 기반으로 분석해주세요. 절대로 코드를 추측하거나 지어내지 마세요. 수집된 파일에 없는 함수나 클래스를 언급하지 마세요. 각 파일을 인용할 때 [파일 N] 번호를 사용해주세요. 이 프로젝트가 무엇을 하는 시스템인지, 핵심 아키텍처, 데이터 흐름, 주요 모듈의 역할을 한국어로 요약해주세요.",
+            UserIntent::Debug => "위에 수집된 실제 컨텍스트만을 기반으로 문제의 원인을 분석해주세요. 존재하지 않는 코드나 에러를 지어내지 마세요. 각 파일을 인용할 때 [파일 N] 번호를 사용해주세요. 코드상으로 원인을 특정하기 어려우면, 수집된 환경 설정(docker-compose, k8s manifest 등)을 참고하여 kubectl logs 등 런타임 로그 확인을 시도해주세요.",
+            UserIntent::Modify => "위에 수집된 실제 파일 내용만을 기반으로 분석해주세요. 수집되지 않은 코드를 추측하지 마세요. 각 파일을 인용할 때 [파일 N] 번호를 사용해주세요. 파일의 구조와 import 관계를 파악하고, 수정 방안을 제시해주세요.",
+            UserIntent::Deploy => "위에 수집된 실제 인프라 설정 파일만을 기반으로 분석해주세요. 수집되지 않은 설정 파일의 내용을 지어내지 마세요. 각 파일을 인용할 때 [파일 N] 번호를 사용해주세요. Dockerfile, CI/CD, k8s manifest를 기반으로 현재 배포 파이프라인을 설명해주세요.",
         }
     }
 }
@@ -350,18 +350,25 @@ async fn run_tui_loop(
                             // === 통합 컨텍스트 파이프라인 ===
                             // 1. Intent 감지
                             let current_intent = detect_intent(&content);
-                            let current_path = extract_path_from_message(&content)
-                                .unwrap_or_else(|| std::env::current_dir()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_default());
+                            let explicit_path = extract_path_from_message(&content);
+                            // 경로가 명시되지 않으면 이전 경로 유지 (후속 질문 지원)
+                            let current_path = match &explicit_path {
+                                Some(p) => p.clone(),
+                                None => context_state.last_path.clone()
+                                    .unwrap_or_else(|| std::env::current_dir()
+                                        .map(|p| p.to_string_lossy().to_string())
+                                        .unwrap_or_default()),
+                            };
 
                             // 2. 생명주기 판단
                             let should_collect = match (&current_intent, &context_state.last_intent) {
                                 (Some(intent), Some(last_intent)) => {
                                     if intent == last_intent && current_path == context_state.last_path.as_deref().unwrap_or("") {
-                                        false // 같은 intent + 같은 path → 기존 유지
+                                        false // 같은 intent + 같은 path → 기존 유지 (후속 질문)
+                                    } else if explicit_path.is_none() && context_state.last_context_key.is_some() {
+                                        false // 경로 미지정 + 기존 컨텍스트 있음 → 후속 질문으로 간주
                                     } else {
-                                        // 다른 intent 또는 다른 path → 기존 제거
+                                        // 다른 intent + 새 경로 → 기존 제거
                                         if let Some(old_key) = &context_state.last_context_key {
                                             session.agent.remove_system_context(old_key).await;
                                         }
@@ -370,13 +377,16 @@ async fn run_tui_loop(
                                 }
                                 (Some(_), None) => true, // 첫 intent
                                 (None, Some(_)) => {
-                                    // intent 없음 → 기존 제거
-                                    if let Some(old_key) = &context_state.last_context_key {
-                                        session.agent.remove_system_context(old_key).await;
+                                    if explicit_path.is_some() {
+                                        // 새 경로 명시 + intent 없음 → 주제 변경, 기존 제거
+                                        if let Some(old_key) = &context_state.last_context_key {
+                                            session.agent.remove_system_context(old_key).await;
+                                        }
+                                        context_state.last_intent = None;
+                                        context_state.last_path = None;
+                                        context_state.last_context_key = None;
                                     }
-                                    context_state.last_intent = None;
-                                    context_state.last_path = None;
-                                    context_state.last_context_key = None;
+                                    // 경로 없으면 후속 질문 → 기존 유지
                                     false
                                 }
                                 (None, None) => false,
@@ -1121,12 +1131,16 @@ async fn collect_context_with_progress(
         return Ok(None);
     }
 
-    // 컨텍스트 문자열 조립
+    // 컨텍스트 문자열 조립 — 각 파일에 번호 매기기
+    let numbered_parts: Vec<String> = final_parts.iter().enumerate()
+        .map(|(i, part)| format!("[파일 {}/{}]\n{}", i + 1, final_parts.len(), part))
+        .collect();
     let context = format!(
-        "[AUTO-CONTEXT: {} — {}]\n\n{}\n\n[TASK: {}]\n[END AUTO-CONTEXT]",
+        "[AUTO-CONTEXT: {} — {} ({}개 파일)]\n\n{}\n\n[TASK: {}]\n[END AUTO-CONTEXT]",
         intent.label(),
         short_name,
-        final_parts.join("\n\n"),
+        final_parts.len(),
+        numbered_parts.join("\n\n"),
         intent.task_instruction(),
     );
 
