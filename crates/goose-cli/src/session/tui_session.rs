@@ -33,6 +33,120 @@ use super::tui::{
 };
 use crate::CliSession;
 
+// ============================================================
+// 자동 컨텍스트 수집 파이프라인 — 데이터 구조
+// ============================================================
+
+/// 사용자 메시지에서 감지된 Intent 유형
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserIntent {
+    Analyze,  // 프로젝트 분석
+    Debug,    // 에러/디버그
+    Modify,   // 코드 수정
+    Deploy,   // 배포/빌드
+}
+
+impl UserIntent {
+    /// 시스템 컨텍스트 키 접미사
+    fn context_key(&self) -> &'static str {
+        match self {
+            UserIntent::Analyze => "analyze",
+            UserIntent::Debug => "debug",
+            UserIntent::Modify => "modify",
+            UserIntent::Deploy => "deploy",
+        }
+    }
+
+    /// 진행 표시용 한국어 라벨
+    fn label(&self) -> &'static str {
+        match self {
+            UserIntent::Analyze => "프로젝트 분석",
+            UserIntent::Debug => "디버그 컨텍스트",
+            UserIntent::Modify => "수정 대상 분석",
+            UserIntent::Deploy => "배포 환경 분석",
+        }
+    }
+
+    /// Intent별 TASK 지시문
+    fn task_instruction(&self) -> &'static str {
+        match self {
+            UserIntent::Analyze => "위에 수집된 실제 코드 내용만을 기반으로 분석해주세요. 절대로 코드를 추측하거나 지어내지 마세요. 수집된 파일에 없는 함수나 클래스를 언급하지 마세요. 이 프로젝트가 무엇을 하는 시스템인지, 핵심 아키텍처, 데이터 흐름, 주요 모듈의 역할을 한국어로 요약해주세요.",
+            UserIntent::Debug => "위에 수집된 실제 컨텍스트만을 기반으로 문제의 원인을 분석해주세요. 존재하지 않는 코드나 에러를 지어내지 마세요. 코드상으로 원인을 특정하기 어려우면, 수집된 환경 설정(docker-compose, k8s manifest 등)을 참고하여 kubectl logs 등 런타임 로그 확인을 시도해주세요.",
+            UserIntent::Modify => "위에 수집된 실제 파일 내용만을 기반으로 분석해주세요. 수집되지 않은 코드를 추측하지 마세요. 파일의 구조와 import 관계를 파악하고, 수정 방안을 제시해주세요.",
+            UserIntent::Deploy => "위에 수집된 실제 인프라 설정 파일만을 기반으로 분석해주세요. 수집되지 않은 설정 파일의 내용을 지어내지 마세요. Dockerfile, CI/CD, k8s manifest를 기반으로 현재 배포 파이프라인을 설명해주세요.",
+        }
+    }
+}
+
+/// Intent 감지 — 우선순위: Debug > Modify > Deploy > Analyze
+fn detect_intent(content: &str) -> Option<UserIntent> {
+    let lower = content.to_lowercase();
+
+    let debug_keywords = [
+        "에러", "오류", "안됨", "debug", "왜", "안돼", "실패",
+        "fail", "error", "bug", "crash", "문제", "traceback", "stack",
+        "로그", "log", "exception", "panic",
+    ];
+    let modify_keywords = [
+        "고쳐", "바꿔", "수정", "추가", "변경",
+        "fix", "change", "add", "update", "modify", "리팩",
+    ];
+    let deploy_keywords = [
+        "배포", "deploy", "릴리즈", "release", "빌드", "build",
+        "도커", "docker", "k8s", "kubernetes", "ci", "cd", "파이프라인",
+    ];
+    let analyze_keywords = [
+        "분석", "analyze", "파악", "이해", "살펴", "inspect",
+        "설명해", "구조", "아키텍처", "architecture",
+    ];
+
+    if debug_keywords.iter().any(|kw| lower.contains(kw)) {
+        Some(UserIntent::Debug)
+    } else if modify_keywords.iter().any(|kw| lower.contains(kw)) {
+        Some(UserIntent::Modify)
+    } else if deploy_keywords.iter().any(|kw| lower.contains(kw)) {
+        Some(UserIntent::Deploy)
+    } else if analyze_keywords.iter().any(|kw| lower.contains(kw)) {
+        Some(UserIntent::Analyze)
+    } else {
+        None
+    }
+}
+
+/// 컨텍스트 생명주기 추적용 상태
+struct ContextState {
+    last_intent: Option<UserIntent>,
+    last_path: Option<String>,
+    last_context_key: Option<String>,
+}
+
+impl ContextState {
+    fn new() -> Self {
+        Self {
+            last_intent: None,
+            last_path: None,
+            last_context_key: None,
+        }
+    }
+}
+
+/// 멀티서비스 감지 결과
+#[allow(dead_code)]
+enum ProjectMode {
+    SingleService,
+    MultiService {
+        service_count: usize,
+        services: Vec<ServiceInfo>,
+    },
+}
+
+/// 멀티서비스 내 개별 서비스 정보
+struct ServiceInfo {
+    name: String,
+    entry_path: std::path::PathBuf,
+    has_dockerfile: bool,
+}
+
 /// TUI 세션 실행
 pub async fn run_tui_session(session: &mut CliSession) -> Result<()> {
     // 터미널 초기화
@@ -165,6 +279,9 @@ async fn run_tui_loop(
     }
     app.add_system_message(startup_msg);
 
+    // 컨텍스트 생명주기 추적
+    let mut context_state = ContextState::new();
+
     // 기존 메시지 히스토리 로드
     for msg in &session.messages {
         match msg.role {
@@ -230,28 +347,59 @@ async fn run_tui_loop(
                                 continue;
                             }
 
-                            // intent 감지 + 컨텍스트 자동 수집 → 시스템 프롬프트에 주입
-                            let project_context = collect_context_with_progress(
-                                &content, &mut app, terminal,
-                            ).await?;
+                            // === 통합 컨텍스트 파이프라인 ===
+                            // 1. Intent 감지
+                            let current_intent = detect_intent(&content);
+                            let current_path = extract_path_from_message(&content)
+                                .unwrap_or_else(|| std::env::current_dir()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_default());
 
-                            // 수집된 컨텍스트가 있으면 시스템 프롬프트에 주입 (사용자 메시지는 원본 유지)
-                            if project_context != content {
-                                let context_only = project_context
-                                    .strip_prefix(&content)
-                                    .unwrap_or(&project_context)
-                                    .to_string();
-                                session.agent.add_system_context(
-                                    "project_analysis_context".to_string(),
-                                    context_only,
-                                ).await;
+                            // 2. 생명주기 판단
+                            let should_collect = match (&current_intent, &context_state.last_intent) {
+                                (Some(intent), Some(last_intent)) => {
+                                    if intent == last_intent && current_path == context_state.last_path.as_deref().unwrap_or("") {
+                                        false // 같은 intent + 같은 path → 기존 유지
+                                    } else {
+                                        // 다른 intent 또는 다른 path → 기존 제거
+                                        if let Some(old_key) = &context_state.last_context_key {
+                                            session.agent.remove_system_context(old_key).await;
+                                        }
+                                        true
+                                    }
+                                }
+                                (Some(_), None) => true, // 첫 intent
+                                (None, Some(_)) => {
+                                    // intent 없음 → 기존 제거
+                                    if let Some(old_key) = &context_state.last_context_key {
+                                        session.agent.remove_system_context(old_key).await;
+                                    }
+                                    context_state.last_intent = None;
+                                    context_state.last_path = None;
+                                    context_state.last_context_key = None;
+                                    false
+                                }
+                                (None, None) => false,
+                            };
+
+                            // 3. 수집 + 주입
+                            if should_collect {
+                                let intent = current_intent.unwrap(); // safe: should_collect=true → Some
+                                if let Some(context) = collect_context_with_progress(
+                                    &content, intent, &mut app, terminal,
+                                ).await? {
+                                    let context_key = format!("project_{}_context", intent.context_key());
+                                    session.agent.add_system_context(context_key.clone(), context).await;
+                                    context_state.last_intent = Some(intent);
+                                    context_state.last_path = Some(current_path);
+                                    context_state.last_context_key = Some(context_key);
+                                }
                             }
-                            let augmented_content = content.clone();
 
-                            // 에이전트에 메시지 전송 및 응답 처리
+                            // 4. 에이전트에 원본 메시지 전송
                             process_agent_message(
                                 session,
-                                &augmented_content,
+                                &content,
                                 &mut app,
                                 terminal,
                             ).await?;
@@ -913,19 +1061,16 @@ fn handle_mcp_notification(
 
 /// 도구 출력에서 SUMMARY 부분만 추출
 /// 상세 파일 목록 등은 제외하고 요약만 표시
-/// 진행 표시 포함 컨텍스트 수집
+///
+/// 통합 컨텍스트 수집 오케스트레이터
+/// Intent를 받아 적절한 수집 함수로 디스패치 + 프리-LLM 평가
 async fn collect_context_with_progress(
     content: &str,
+    intent: UserIntent,
     app: &mut TuiApp<'_>,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<String> {
-    let analyze_keywords = ["분석", "analyze", "설명해", "파악", "이해", "살펴", "inspect"];
-    let is_analyze = analyze_keywords.iter().any(|kw| content.contains(kw));
-
-    if !is_analyze {
-        return Ok(content.to_string());
-    }
-
+) -> Result<Option<String>> {
+    // 경로 추출
     let path = extract_path_from_message(content);
     let project_path = match path {
         Some(p) if std::path::Path::new(&p).is_dir() => p,
@@ -935,7 +1080,7 @@ async fn collect_context_with_progress(
     };
 
     if project_path.is_empty() {
-        return Ok(content.to_string());
+        return Ok(None);
     }
 
     let base = std::path::Path::new(&project_path);
@@ -943,250 +1088,49 @@ async fn collect_context_with_progress(
         .and_then(|n| n.to_str())
         .unwrap_or("project");
 
-    // 진행 메시지 인덱스 기억
-    let total_steps = 7;
-    let mut step = 0;
-    app.add_system_message(make_progress_bar(0, total_steps, &format!("{} 분석 준비", short_name)));
+    // 진행 메시지 초기화
+    app.add_system_message(make_progress_bar(0, 7, &format!("{} {} 준비", short_name, intent.label())));
     terminal.draw(|frame| app.render(frame))?;
     let progress_idx = app.messages.len() - 1;
 
-    let mut context_parts: Vec<String> = Vec::new();
-    let mut read_count = 0;
-    let max_reads = 10;
-    let max_lines_per_file = 30;
-
-    // === Step 1: 프로젝트 트리 ===
-    step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "디렉토리 구조 스캔"))?;
-    if let Ok(entries) = std::fs::read_dir(base) {
-        let mut dirs = Vec::new();
-        let mut files = Vec::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') { continue; }
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if !["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build", "scripts", "tests", "docs", "patches", "static", "data"].contains(&name.as_str()) {
-                    dirs.push(format!("  {}/", name));
-                }
-            } else {
-                files.push(format!("  {}", name));
-            }
-        }
-        dirs.sort();
-        files.sort();
-        context_parts.push(format!("## 프로젝트 트리\n```\n{}\n{}\n```", dirs.join("\n"), files.join("\n")));
-    }
-
-    // === Step 2: 문서 + 의존성 읽기 & 언어 감지 ===
-    step += 1;
-    let mut detected_lang = "unknown";
-
-    // 문서 파일
-    for name in &["README.md", "CLAUDE.md", "readme.md"] {
-        if read_count >= max_reads { break; }
-        let file_path = base.join(name);
-        if file_path.exists() {
-            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
-            if let Ok(file_content) = std::fs::read_to_string(&file_path) {
-                let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (문서)\n```\n{}\n```", name, truncated));
-                read_count += 1;
-            }
-        }
-    }
-
-    // 의존성 파일 → 언어 감지
-    let dep_lang_map: &[(&str, &str)] = &[
-        ("requirements.txt", "python"), ("pyproject.toml", "python"), ("setup.py", "python"),
-        ("package.json", "node"), ("tsconfig.json", "node"),
-        ("Cargo.toml", "rust"),
-        ("go.mod", "go"),
-        ("pom.xml", "java"), ("build.gradle", "java"), ("build.gradle.kts", "kotlin"),
-        ("*.csproj", "dotnet"), ("*.sln", "dotnet"),
-        ("Gemfile", "ruby"),
-    ];
-
-    step += 1;
-    for (dep_file, lang) in dep_lang_map {
-        if read_count >= max_reads { break; }
-        if dep_file.starts_with('*') {
-            // 글로브 패턴
-            let ext = dep_file.trim_start_matches('*');
-            if let Ok(entries) = std::fs::read_dir(base) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    if name.ends_with(ext) {
-                        detected_lang = lang;
-                        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
-                        if let Ok(c) = std::fs::read_to_string(entry.path()) {
-                            let t: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
-                            context_parts.push(format!("## {} (의존성/{})\n```\n{}\n```", name, lang, t));
-                            read_count += 1;
-                        }
-                        break;
-                    }
-                }
-            }
-        } else {
-            let file_path = base.join(dep_file);
-            if file_path.exists() {
-                detected_lang = lang;
-                update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", dep_file)))?;
-                if let Ok(c) = std::fs::read_to_string(&file_path) {
-                    let t: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
-                    context_parts.push(format!("## {} (의존성/{})\n```\n{}\n```", dep_file, lang, t));
-                    read_count += 1;
-                }
-            }
-        }
-    }
-
-    // === Step 4: 언어별 엔트리포인트 탐색 ===
-    step += 1;
-    let entry_names: Vec<&str> = match detected_lang {
-        "python" => vec!["main.py", "app.py", "manage.py", "wsgi.py", "__main__.py"],
-        "node" => vec!["index.ts", "index.js", "app.ts", "app.js", "server.ts", "server.js", "main.tsx", "App.tsx", "App.vue"],
-        "rust" => vec!["main.rs", "lib.rs"],
-        "go" => vec!["main.go"],
-        "java" => vec!["Application.java", "Main.java", "App.java"],
-        "kotlin" => vec!["Application.kt", "Main.kt"],
-        "dotnet" => vec!["Program.cs", "Startup.cs"],
-        "ruby" => vec!["config.ru", "app.rb"],
-        _ => vec!["main.py", "app.py", "main.rs", "index.ts", "main.go", "Program.cs", "Application.java"],
+    // Intent별 수집 디스패치
+    let (context_parts, read_count) = match intent {
+        UserIntent::Analyze => collect_analyze_context(base, content, "unknown", app, terminal, progress_idx)?,
+        UserIntent::Debug => collect_debug_context(base, content, app, terminal, progress_idx)?,
+        UserIntent::Modify => collect_modify_context(base, content, app, terminal, progress_idx)?,
+        UserIntent::Deploy => collect_deploy_context(base, content, app, terminal, progress_idx)?,
     };
-    let mut found_entries = Vec::new();
-    for name in &entry_names {
-        find_all_files_recursive(base, name, 4, &mut found_entries);
-    }
-    found_entries.sort();
-    found_entries.dedup();
-    for found in &found_entries {
-        if read_count >= max_reads { break; }
-        let rel_path = found.strip_prefix(base).unwrap_or(found);
-        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
-        if let Ok(file_content) = std::fs::read_to_string(found) {
-            let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-            context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
-            read_count += 1;
-        }
-    }
 
-    // === Step 5: 언어별 설정 파일 ===
-    step += 1;
-    let config_names: Vec<&str> = match detected_lang {
-        "python" => vec!["config.py", "settings.py", ".env.example", "docker-compose.yml"],
-        "node" => vec!["vite.config.ts", "next.config.js", "webpack.config.js", ".env.example", "docker-compose.yml"],
-        "rust" => vec!["config.rs", ".env.example", "docker-compose.yml"],
-        "go" => vec!["config.go", "config.yaml", ".env.example", "docker-compose.yml"],
-        "java" | "kotlin" => vec!["application.yml", "application.properties", "docker-compose.yml"],
-        "dotnet" => vec!["appsettings.json", "appsettings.Development.json", "docker-compose.yml"],
-        _ => vec!["config.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"],
+    // 프리-LLM 평가: 수집 파일이 너무 적으면 Analyze로 폴백 (1회)
+    let (final_parts, final_count) = if read_count < 5 && intent != UserIntent::Analyze {
+        update_progress(app, terminal, progress_idx,
+            &make_progress_bar(3, 7, "수집 부족 — 프로젝트 분석으로 보충"))?;
+        let (mut extra_parts, extra_count) = collect_analyze_context(base, content, "unknown", app, terminal, progress_idx)?;
+        let mut combined = context_parts;
+        combined.append(&mut extra_parts);
+        (combined, read_count + extra_count)
+    } else {
+        (context_parts, read_count)
     };
-    for name in &config_names {
-        if read_count >= max_reads { break; }
-        if let Some(found) = find_file_recursive(base, name, 3) {
-            let rel_path = found.strip_prefix(base).unwrap_or(&found);
-            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
-            if let Ok(file_content) = std::fs::read_to_string(&found) {
-                let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (설정)\n```\n{}\n```", rel_path.display(), truncated));
-                read_count += 1;
-            }
-        }
-    }
 
-    // === Step 6: 언어별 핵심 코드 디렉토리 ===
-    step += 1;
-    let code_patterns: Vec<(&str, &str)> = match detected_lang {
-        "python" => vec![
-            ("routers", "라우터"), ("router", "라우터"), ("api", "API"),
-            ("services", "서비스"), ("service", "서비스"),
-            ("models", "모델"), ("schemas", "스키마"),
-            ("orchestrator", "오케스트레이터"), ("handlers", "핸들러"),
-            ("core", "코어"), ("middleware", "미들웨어"),
-        ],
-        "node" => vec![
-            ("routes", "라우터"), ("pages", "페이지"), ("views", "뷰"),
-            ("components", "컴포넌트"), ("services", "서비스"),
-            ("models", "모델"), ("lib", "라이브러리"),
-            ("hooks", "훅"), ("store", "상태관리"), ("middleware", "미들웨어"),
-        ],
-        "java" | "kotlin" => vec![
-            ("controller", "컨트롤러"), ("controllers", "컨트롤러"),
-            ("service", "서비스"), ("services", "서비스"),
-            ("repository", "레포지토리"), ("model", "모델"), ("entity", "엔티티"),
-            ("config", "설정"), ("dto", "DTO"),
-        ],
-        "go" => vec![
-            ("handler", "핸들러"), ("handlers", "핸들러"),
-            ("service", "서비스"), ("services", "서비스"),
-            ("model", "모델"), ("router", "라우터"),
-            ("middleware", "미들웨어"), ("cmd", "커맨드"),
-        ],
-        "dotnet" => vec![
-            ("Controllers", "컨트롤러"), ("Services", "서비스"),
-            ("Models", "모델"), ("Data", "데이터"),
-            ("Middleware", "미들웨어"), ("Hubs", "허브"),
-        ],
-        "rust" => vec![
-            ("routes", "라우터"), ("handlers", "핸들러"),
-            ("services", "서비스"), ("models", "모델"),
-        ],
-        _ => vec![
-            ("routes", "라우터"), ("services", "서비스"),
-            ("models", "모델"), ("handlers", "핸들러"),
-            ("controllers", "컨트롤러"), ("core", "코어"),
-        ],
-    };
-    for (dir_name, label) in &code_patterns {
-        if read_count >= max_reads { break; }
-        if let Some(dir_path) = find_dir_recursive(base, dir_name, 3) {
-            if let Some(biggest) = find_biggest_file(&dir_path) {
-                let rel_path = biggest.strip_prefix(base).unwrap_or(&biggest);
-                update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
-                if let Ok(file_content) = std::fs::read_to_string(&biggest) {
-                    let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-                    context_parts.push(format!("## {} — {} (핵심 코드)\n```\n{}\n```", rel_path.display(), label, truncated));
-                    read_count += 1;
-                }
-            }
-        }
-    }
-
-    // === Step 7: Git 상태 ===
-    step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Git 상태 확인"))?;
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["log", "--oneline", "-5"])
-        .current_dir(base).output()
-    {
-        if output.status.success() {
-            let log = String::from_utf8_lossy(&output.stdout);
-            context_parts.push(format!("## Git 최근 커밋\n```\n{}\n```", log.trim()));
-        }
-    }
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(base).output()
-    {
-        if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout);
-            context_parts.push(format!("현재 브랜치: `{}`", branch.trim()));
-        }
-    }
-
-    // === 완료 ===
+    // 완료 표시
     update_progress(app, terminal, progress_idx,
-        &format!("◉ ━━━━━━━━━━━━━━━━━━━━ [100%] {}/{} — {}개 파일 수집 완료, AI 분석 중...", total_steps, total_steps, read_count))?;
+        &format!("◉ ━━━━━━━━━━━━━━━━━━━━ [100%] — {}개 파일 수집 완료, AI 분석 중...", final_count))?;
 
-    if context_parts.is_empty() {
-        return Ok(content.to_string());
+    if final_parts.is_empty() {
+        return Ok(None);
     }
 
-    Ok(format!(
-        "{}\n\n[CONTEXT: 아래는 자동 수집된 프로젝트 파일 {}개입니다]\n\n{}\n\n[TASK: 위 코드를 읽고 이 프로젝트가 무엇을 하는 시스템인지, 핵심 아키텍처, 데이터 흐름, 주요 모듈의 역할을 한국어로 요약해주세요. 파일 목록이 아닌 실제 코드 내용 기반으로 설명해주세요.]\n",
-        content, read_count, context_parts.join("\n\n")
-    ))
+    // 컨텍스트 문자열 조립
+    let context = format!(
+        "[AUTO-CONTEXT: {} — {}]\n\n{}\n\n[TASK: {}]\n[END AUTO-CONTEXT]",
+        intent.label(),
+        short_name,
+        final_parts.join("\n\n"),
+        intent.task_instruction(),
+    );
+
+    Ok(Some(context))
 }
 
 /// 진행 메시지 업데이트 + 리드로우
@@ -1218,49 +1162,36 @@ fn make_progress_bar(current: usize, total: usize, step_name: &str) -> String {
     format!("{} {} [{}] {}/{} — {}", spinner, bar, pct, current, total, step_name)
 }
 
-/// 사용자 메시지에서 intent 감지 + 프로젝트 컨텍스트 자동 수집 (하위 호환용)
-async fn detect_and_augment_intent(content: &str) -> String {
-    // "분석" intent 감지
-    let analyze_keywords = ["분석", "analyze", "설명해", "파악", "이해", "살펴", "inspect"];
-    let is_analyze = analyze_keywords.iter().any(|kw| content.contains(kw));
+// ============================================================
+// Intent별 수집 함수
+// ============================================================
 
-    if !is_analyze {
-        return content.to_string();
-    }
-
-    // 경로 추출 (Windows/Unix)
-    let path = extract_path_from_message(content);
-    let project_path = match path {
-        Some(p) if std::path::Path::new(&p).is_dir() => p,
-        _ => {
-            // 경로 없으면 현재 디렉토리
-            std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default()
-        }
-    };
-
-    if project_path.is_empty() {
-        return content.to_string();
-    }
-
-    tracing::info!("Intent 감지: 프로젝트 분석 ({})", project_path);
-
-    // 컨텍스트 자동 수집
+/// Analyze intent: 프로젝트 구조 분석 (멀티서비스 감지 포함)
+fn collect_analyze_context(
+    base: &std::path::Path,
+    content: &str,
+    detected_lang: &str,
+    app: &mut TuiApp<'_>,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    progress_idx: usize,
+) -> Result<(Vec<String>, usize)> {
     let mut context_parts: Vec<String> = Vec::new();
-    let base = std::path::Path::new(&project_path);
+    let mut read_count = 0;
+    let max_lines_per_file = 30;
+    let total_steps = 7;
+    let mut step = 0;
 
-    // 1. 프로젝트 트리 (1 depth)
+    // === Step 1: 프로젝트 트리 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "디렉토리 구조 스캔"))?;
     if let Ok(entries) = std::fs::read_dir(base) {
         let mut dirs = Vec::new();
         let mut files = Vec::new();
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
+            if name.starts_with('.') { continue; }
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if !["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build", "scripts", "tests", "docs", "patches", "static", "data"].contains(&name.as_str()) {
+                if !SKIP_DIRS.contains(&name.as_str()) {
                     dirs.push(format!("  {}/", name));
                 }
             } else {
@@ -1272,104 +1203,389 @@ async fn detect_and_augment_intent(content: &str) -> String {
         context_parts.push(format!("## 프로젝트 트리\n```\n{}\n{}\n```", dirs.join("\n"), files.join("\n")));
     }
 
-    // 2. 핵심 파일 자동 읽기
-    let doc_files = ["README.md", "CLAUDE.md", "readme.md"];
-    let dep_files = ["requirements.txt", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.xml"];
-    let entry_files = ["main.py", "app.py", "manage.py", "main.rs", "lib.rs", "index.ts", "app.ts", "main.go", "Main.java"];
-    let config_files = ["config.py", "settings.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"];
-
-    let mut read_count = 0;
-    let max_reads = 10;
-    let max_lines_per_file = 30;
-
-    // 문서 파일
-    for name in &doc_files {
-        if read_count >= max_reads { break; }
+    // === Step 2: 문서 파일 ===
+    step += 1;
+    for name in &["README.md", "CLAUDE.md", "readme.md"] {
+        if read_count >= 10 { break; }
         let file_path = base.join(name);
         if file_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (자동 읽기)\n```\n{}\n```", name, truncated));
+            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
+            if let Ok(file_content) = std::fs::read_to_string(&file_path) {
+                let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (문서)\n```\n{}\n```", name, truncated));
                 read_count += 1;
             }
         }
     }
 
-    // 의존성 파일
-    for name in &dep_files {
-        if read_count >= max_reads { break; }
-        let file_path = base.join(name);
-        if file_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&file_path) {
-                let truncated: String = content.lines().take(80).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (의존성)\n```\n{}\n```", name, truncated));
-                read_count += 1;
-            }
-        }
-    }
-
-    // 엔트리포인트 — 재귀 검색 (최대 2 depth)
-    for name in &entry_files {
-        if read_count >= max_reads { break; }
-        if let Some(found) = find_file_recursive(base, name, 3) {
-            if let Ok(content) = std::fs::read_to_string(&found) {
-                let rel_path = found.strip_prefix(base).unwrap_or(&found);
-                let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
-                read_count += 1;
-            }
-        }
-    }
-
-    // 설정 파일 — 재귀 검색
-    for name in &config_files {
-        if read_count >= max_reads { break; }
-        if let Some(found) = find_file_recursive(base, name, 3) {
-            if let Ok(content) = std::fs::read_to_string(&found) {
-                let rel_path = found.strip_prefix(base).unwrap_or(&found);
-                let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (설정)\n```\n{}\n```", rel_path.display(), truncated));
-                read_count += 1;
-            }
-        }
-    }
-
-    // 2.5. 라우터/서비스/모델 자동 탐색 (패턴 기반)
-    let code_patterns = [
-        ("routes", "라우터/API"),
-        ("router", "라우터/API"),
-        ("api", "라우터/API"),
-        ("services", "서비스/비즈니스 로직"),
-        ("service", "서비스/비즈니스 로직"),
-        ("models", "데이터 모델"),
-        ("model", "데이터 모델"),
-        ("schemas", "스키마"),
-        ("orchestrator", "오케스트레이터"),
-        ("handlers", "핸들러"),
-        ("middleware", "미들웨어"),
+    // === Step 3: 의존성 파일 + 언어 감지 ===
+    step += 1;
+    let dep_lang_map: &[(&str, &str)] = &[
+        ("requirements.txt", "python"), ("pyproject.toml", "python"), ("setup.py", "python"),
+        ("package.json", "node"), ("tsconfig.json", "node"),
+        ("Cargo.toml", "rust"),
+        ("go.mod", "go"),
+        ("pom.xml", "java"), ("build.gradle", "java"), ("build.gradle.kts", "kotlin"),
+        ("*.csproj", "dotnet"), ("*.sln", "dotnet"),
+        ("Gemfile", "ruby"),
     ];
-
-    for (dir_name, label) in &code_patterns {
-        if read_count >= max_reads { break; }
-        // 2 depth까지 해당 이름의 디렉토리 찾기
-        if let Some(dir_path) = find_dir_recursive(base, dir_name, 3) {
-            // 디렉토리 안에서 가장 큰 파일 하나 읽기
-            if let Some(biggest) = find_biggest_file(&dir_path) {
-                if let Ok(content) = std::fs::read_to_string(&biggest) {
-                    let rel_path = biggest.strip_prefix(base).unwrap_or(&biggest);
-                    let truncated: String = content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-                    context_parts.push(format!("## {} — {} (핵심 코드)\n```\n{}\n```", rel_path.display(), label, truncated));
+    let mut lang = detected_lang.to_string();
+    for (dep_file, dep_lang) in dep_lang_map {
+        if read_count >= 10 { break; }
+        if dep_file.starts_with('*') {
+            let ext = dep_file.trim_start_matches('*');
+            if let Ok(entries) = std::fs::read_dir(base) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(ext) {
+                        lang = dep_lang.to_string();
+                        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
+                        if let Ok(c) = std::fs::read_to_string(entry.path()) {
+                            let t: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
+                            context_parts.push(format!("## {} (의존성/{})\n```\n{}\n```", name, dep_lang, t));
+                            read_count += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+        } else {
+            let file_path = base.join(dep_file);
+            if file_path.exists() {
+                lang = dep_lang.to_string();
+                update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", dep_file)))?;
+                if let Ok(c) = std::fs::read_to_string(&file_path) {
+                    let t: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (의존성/{})\n```\n{}\n```", dep_file, dep_lang, t));
                     read_count += 1;
                 }
             }
         }
     }
 
-    // 3. Git 상태
+    // === Step 4: 엔트리포인트 + 멀티서비스 감지 ===
+    step += 1;
+    let entry_names: Vec<&str> = match lang.as_str() {
+        "python" => vec!["main.py", "app.py", "manage.py", "wsgi.py", "__main__.py"],
+        "node" => vec!["index.ts", "index.js", "app.ts", "app.js", "server.ts", "server.js", "main.tsx", "App.tsx", "App.vue"],
+        "rust" => vec!["main.rs", "lib.rs"],
+        "go" => vec!["main.go"],
+        "java" => vec!["Application.java", "Main.java", "App.java"],
+        "kotlin" => vec!["Application.kt", "Main.kt"],
+        "dotnet" => vec!["Program.cs", "Startup.cs"],
+        "ruby" => vec!["config.ru", "app.rb"],
+        _ => vec!["main.py", "app.py", "main.rs", "index.ts", "main.go", "Program.cs", "Application.java"],
+    };
+    let mut found_entries = Vec::new();
+    for name in &entry_names {
+        find_all_files_recursive(base, name, 4, &mut found_entries);
+    }
+    found_entries.sort();
+    found_entries.dedup();
+
+    // 멀티서비스 감지: 1단계 하위 디렉토리 기준 그룹핑
+    let mut service_dirs: std::collections::HashMap<String, Vec<std::path::PathBuf>> = std::collections::HashMap::new();
+    for entry in &found_entries {
+        if let Ok(rel) = entry.strip_prefix(base) {
+            if let Some(first_component) = rel.components().next() {
+                let dir_name = first_component.as_os_str().to_string_lossy().to_string();
+                service_dirs.entry(dir_name).or_default().push(entry.clone());
+            }
+        }
+    }
+
+    let is_multi_service = service_dirs.len() >= 3;
+
+    if is_multi_service {
+        // 멀티서비스 모드: 서비스 맵 생성
+        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "멀티서비스 감지"))?;
+
+        // 사용자가 특정 서비스를 언급했는지 확인 (퍼지 매칭: 언더스코어/하이픈 무시)
+        let normalize = |s: &str| -> String {
+            s.to_lowercase().replace('_', "").replace('-', "")
+        };
+        let content_normalized = normalize(content);
+        let target_service: Option<String> = service_dirs.keys()
+            .find(|dir_name| content_normalized.contains(&normalize(dir_name)))
+            .cloned();
+
+        if let Some(ref target) = target_service {
+            // 특정 서비스 딥 분석
+            context_parts.push(format!("## 멀티서비스 프로젝트 ({}개 서비스 중 `{}` 상세 분석)", service_dirs.len(), target));
+            let service_base = base.join(target);
+            let max_reads = 10;
+            // 해당 서비스 내 엔트리포인트만 깊이 읽기
+            for entry_path in found_entries.iter().filter(|p| p.starts_with(&service_base)) {
+                if read_count >= max_reads { break; }
+                let rel_path = entry_path.strip_prefix(base).unwrap_or(entry_path);
+                update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+                if let Ok(fc) = std::fs::read_to_string(entry_path) {
+                    let truncated: String = fc.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
+                    read_count += 1;
+                }
+            }
+        } else {
+            // 전체 서비스 개요: 각 서비스 main.py 첫 5줄 + Dockerfile 유무
+            let mut service_map = Vec::new();
+            let mut sorted_dirs: Vec<_> = service_dirs.keys().cloned().collect();
+            sorted_dirs.sort();
+            for dir_name in &sorted_dirs {
+                if read_count >= 15 { break; }
+                let entries = &service_dirs[dir_name];
+                let has_dockerfile = base.join(dir_name).join("Dockerfile").exists();
+                let df_mark = if has_dockerfile { " [Dockerfile ✓]" } else { "" };
+
+                if let Some(first_entry) = entries.first() {
+                    if let Ok(fc) = std::fs::read_to_string(first_entry) {
+                        let preview: String = fc.lines().take(5).collect::<Vec<_>>().join("\n");
+                        let rel = first_entry.strip_prefix(base).unwrap_or(first_entry);
+                        service_map.push(format!("### {}/{}{}\n```\n{}\n```", dir_name, rel.file_name().unwrap_or_default().to_string_lossy(), df_mark, preview));
+                        read_count += 1;
+                    }
+                }
+            }
+            context_parts.push(format!(
+                "## 멀티서비스 프로젝트 — {}개 서비스 구성\n\n특정 서비스를 상세 분석하려면 서비스명을 지정해주세요.\n\n{}",
+                service_dirs.len(), service_map.join("\n\n")
+            ));
+        }
+    } else {
+        // 단일서비스: 기존 깊이 분석
+        for found in &found_entries {
+            if read_count >= 10 { break; }
+            let rel_path = found.strip_prefix(base).unwrap_or(found);
+            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+            if let Ok(file_content) = std::fs::read_to_string(found) {
+                let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // === Step 5: 설정 파일 ===
+    step += 1;
+    let config_names: Vec<&str> = match lang.as_str() {
+        "python" => vec!["config.py", "settings.py", ".env.example", "docker-compose.yml"],
+        "node" => vec!["vite.config.ts", "next.config.js", "webpack.config.js", ".env.example", "docker-compose.yml"],
+        "rust" => vec!["config.rs", ".env.example", "docker-compose.yml"],
+        "go" => vec!["config.go", "config.yaml", ".env.example", "docker-compose.yml"],
+        "java" | "kotlin" => vec!["application.yml", "application.properties", "docker-compose.yml"],
+        "dotnet" => vec!["appsettings.json", "appsettings.Development.json", "docker-compose.yml"],
+        _ => vec!["config.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"],
+    };
+    let max_reads_limit = if is_multi_service { 15 } else { 10 };
+    for name in &config_names {
+        if read_count >= max_reads_limit { break; }
+        if let Some(found) = find_file_recursive(base, name, 3) {
+            let rel_path = found.strip_prefix(base).unwrap_or(&found);
+            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+            if let Ok(file_content) = std::fs::read_to_string(&found) {
+                let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (설정)\n```\n{}\n```", rel_path.display(), truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // === Step 6: 핵심 코드 디렉토리 (단일서비스만) ===
+    step += 1;
+    if !is_multi_service {
+        let code_patterns: Vec<(&str, &str)> = match lang.as_str() {
+            "python" => vec![
+                ("routers", "라우터"), ("router", "라우터"), ("api", "API"),
+                ("services", "서비스"), ("service", "서비스"),
+                ("models", "모델"), ("schemas", "스키마"),
+                ("orchestrator", "오케스트레이터"), ("handlers", "핸들러"),
+                ("core", "코어"), ("middleware", "미들웨어"),
+            ],
+            "node" => vec![
+                ("routes", "라우터"), ("pages", "페이지"), ("views", "뷰"),
+                ("components", "컴포넌트"), ("services", "서비스"),
+                ("models", "모델"), ("lib", "라이브러리"),
+                ("hooks", "훅"), ("store", "상태관리"), ("middleware", "미들웨어"),
+            ],
+            "java" | "kotlin" => vec![
+                ("controller", "컨트롤러"), ("controllers", "컨트롤러"),
+                ("service", "서비스"), ("services", "서비스"),
+                ("repository", "레포지토리"), ("model", "모델"), ("entity", "엔티티"),
+                ("config", "설정"), ("dto", "DTO"),
+            ],
+            "go" => vec![
+                ("handler", "핸들러"), ("handlers", "핸들러"),
+                ("service", "서비스"), ("services", "서비스"),
+                ("model", "모델"), ("router", "라우터"),
+                ("middleware", "미들웨어"), ("cmd", "커맨드"),
+            ],
+            "dotnet" => vec![
+                ("Controllers", "컨트롤러"), ("Services", "서비스"),
+                ("Models", "모델"), ("Data", "데이터"),
+                ("Middleware", "미들웨어"), ("Hubs", "허브"),
+            ],
+            "rust" => vec![
+                ("routes", "라우터"), ("handlers", "핸들러"),
+                ("services", "서비스"), ("models", "모델"),
+            ],
+            _ => vec![
+                ("routes", "라우터"), ("services", "서비스"),
+                ("models", "모델"), ("handlers", "핸들러"),
+                ("controllers", "컨트롤러"), ("core", "코어"),
+            ],
+        };
+        for (dir_name, label) in &code_patterns {
+            if read_count >= max_reads_limit { break; }
+            if let Some(dir_path) = find_dir_recursive(base, dir_name, 3) {
+                if let Some(biggest) = find_biggest_file(&dir_path) {
+                    let rel_path = biggest.strip_prefix(base).unwrap_or(&biggest);
+                    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+                    if let Ok(file_content) = std::fs::read_to_string(&biggest) {
+                        let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+                        context_parts.push(format!("## {} — {} (핵심 코드)\n```\n{}\n```", rel_path.display(), label, truncated));
+                        read_count += 1;
+                    }
+                }
+            }
+        }
+    } else {
+        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "멀티서비스 — 핵심코드 스킵"))?;
+    }
+
+    // === Step 7: Git 상태 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Git 상태 확인"))?;
+    collect_git_status(base, &mut context_parts);
+
+    Ok((context_parts, read_count))
+}
+
+/// Debug intent: 에러 원인 추적용 컨텍스트
+fn collect_debug_context(
+    base: &std::path::Path,
+    content: &str,
+    app: &mut TuiApp<'_>,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    progress_idx: usize,
+) -> Result<(Vec<String>, usize)> {
+    let mut context_parts: Vec<String> = Vec::new();
+    let mut read_count = 0;
+    let max_reads = 12;
+    let max_lines = 50;
+    let total_steps = 6;
+    let mut step = 0;
+
+    // === Step 1: 프로젝트 트리 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "프로젝트 구조 스캔"))?;
+    collect_project_tree(base, &mut context_parts);
+
+    // === Step 2: 사용자가 언급한 파일 읽기 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "관련 파일 탐색"))?;
+    if let Some(mentioned_path) = extract_path_from_message(content) {
+        let p = std::path::Path::new(&mentioned_path);
+        if p.is_file() {
+            if let Ok(fc) = std::fs::read_to_string(p) {
+                let rel = p.strip_prefix(base).unwrap_or(p);
+                let truncated: String = fc.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (사용자 지정 파일)\n```\n{}\n```", rel.display(), truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // === Step 3: 로그 파일 탐색 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "로그 파일 탐색"))?;
+    let log_patterns = ["*.log", "*.err"];
+    for pattern in &log_patterns {
+        if read_count >= max_reads { break; }
+        let ext = pattern.trim_start_matches('*');
+        // logs/ 디렉토리 확인
+        let logs_dir = base.join("logs");
+        if logs_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&logs_dir) {
+                for entry in entries.flatten() {
+                    if read_count >= max_reads { break; }
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(ext) {
+                        if let Ok(fc) = std::fs::read_to_string(entry.path()) {
+                            // 로그는 끝부분이 중요 — 마지막 50줄
+                            let lines: Vec<&str> = fc.lines().collect();
+                            let start = lines.len().saturating_sub(max_lines);
+                            let tail: String = lines[start..].join("\n");
+                            context_parts.push(format!("## logs/{} (최근 로그)\n```\n{}\n```", name, tail));
+                            read_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // 루트의 로그 파일
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                if read_count >= max_reads { break; }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with(ext) && entry.path().is_file() {
+                    if let Ok(fc) = std::fs::read_to_string(entry.path()) {
+                        let lines: Vec<&str> = fc.lines().collect();
+                        let start = lines.len().saturating_sub(max_lines);
+                        let tail: String = lines[start..].join("\n");
+                        context_parts.push(format!("## {} (로그)\n```\n{}\n```", name, tail));
+                        read_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // === Step 4: 환경 설정 (LLM이 런타임 로그 확인할 때 필요) ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "환경 설정 수집"))?;
+    let env_files = ["docker-compose.yml", "docker-compose.yaml", "Dockerfile", ".env.example"];
+    for name in &env_files {
+        if read_count >= max_reads { break; }
+        if let Some(found) = find_file_recursive(base, name, 3) {
+            let rel = found.strip_prefix(base).unwrap_or(&found);
+            if let Ok(fc) = std::fs::read_to_string(&found) {
+                let truncated: String = fc.lines().take(40).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (환경설정)\n```\n{}\n```", rel.display(), truncated));
+                read_count += 1;
+            }
+        }
+    }
+    // k8s manifest 탐색
+    for dir_name in &["k8s", "deploy", "manifests", "kubernetes", "helm"] {
+        if read_count >= max_reads { break; }
+        if let Some(dir_path) = find_dir_recursive(base, dir_name, 2) {
+            if let Some(biggest) = find_biggest_file_any(&dir_path, &["yml", "yaml", "json"]) {
+                let rel = biggest.strip_prefix(base).unwrap_or(&biggest);
+                if let Ok(fc) = std::fs::read_to_string(&biggest) {
+                    let truncated: String = fc.lines().take(40).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (k8s/배포)\n```\n{}\n```", rel.display(), truncated));
+                    read_count += 1;
+                }
+            }
+        }
+    }
+
+    // === Step 5: Git diff (unstaged) + 최근 커밋 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Git 변경사항 확인"))?;
     if let Ok(output) = std::process::Command::new("git")
-        .args(["log", "--oneline", "-5"])
-        .current_dir(base)
-        .output()
+        .args(["diff", "--stat"])
+        .current_dir(base).output()
+    {
+        if output.status.success() {
+            let diff = String::from_utf8_lossy(&output.stdout);
+            if !diff.trim().is_empty() {
+                context_parts.push(format!("## Git diff (미커밋 변경)\n```\n{}\n```", diff.trim()));
+            }
+        }
+    }
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["log", "--oneline", "-3"])
+        .current_dir(base).output()
     {
         if output.status.success() {
             let log = String::from_utf8_lossy(&output.stdout);
@@ -1377,28 +1593,400 @@ async fn detect_and_augment_intent(content: &str) -> String {
         }
     }
 
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(base)
-        .output()
-    {
-        if output.status.success() {
-            let branch = String::from_utf8_lossy(&output.stdout);
-            context_parts.push(format!("현재 브랜치: `{}`", branch.trim()));
+    // === Step 6: 의존성 파일 (에러 원인 파악용) ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "의존성 확인"))?;
+    let dep_files = ["requirements.txt", "pyproject.toml", "package.json", "Cargo.toml", "go.mod"];
+    for name in &dep_files {
+        if read_count >= max_reads { break; }
+        let file_path = base.join(name);
+        if file_path.exists() {
+            if let Ok(fc) = std::fs::read_to_string(&file_path) {
+                let truncated: String = fc.lines().take(30).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (의존성)\n```\n{}\n```", name, truncated));
+                read_count += 1;
+            }
+            break; // 의존성 파일 하나만
         }
     }
 
-    if context_parts.is_empty() {
-        return content.to_string();
+    Ok((context_parts, read_count))
+}
+
+/// Modify intent: 수정 대상 파일 + 관련 파일 수집
+fn collect_modify_context(
+    base: &std::path::Path,
+    content: &str,
+    app: &mut TuiApp<'_>,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    progress_idx: usize,
+) -> Result<(Vec<String>, usize)> {
+    let mut context_parts: Vec<String> = Vec::new();
+    let mut read_count = 0;
+    let max_reads = 8;
+    let max_lines = 80;
+    let total_steps = 5;
+    let mut step = 0;
+
+    // === Step 1: 프로젝트 트리 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "프로젝트 구조 스캔"))?;
+    collect_project_tree(base, &mut context_parts);
+
+    // === Step 2: 사용자가 지정한 파일 읽기 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "대상 파일 읽기"))?;
+    let mut target_file: Option<std::path::PathBuf> = None;
+    if let Some(mentioned_path) = extract_path_from_message(content) {
+        let p = std::path::Path::new(&mentioned_path);
+        if p.is_file() {
+            if let Ok(fc) = std::fs::read_to_string(p) {
+                let rel = p.strip_prefix(base).unwrap_or(p);
+                let truncated: String = fc.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (수정 대상)\n```\n{}\n```", rel.display(), truncated));
+                read_count += 1;
+                target_file = Some(p.to_path_buf());
+            }
+        }
     }
 
-    // 원본 메시지 + 수집된 컨텍스트를 합쳐서 LLM에 전달
-    format!(
-        "{}\n\n[CONTEXT: 아래는 자동 수집된 프로젝트 파일 {}개입니다]\n\n{}\n\n[TASK: 위 코드를 읽고 이 프로젝트가 무엇을 하는 시스템인지, 핵심 아키텍처, 데이터 흐름, 주요 모듈의 역할을 한국어로 요약해주세요. 파일 목록이 아닌 실제 코드 내용 기반으로 설명해주세요.]\n",
-        content,
-        read_count,
-        context_parts.join("\n\n")
-    )
+    // === Step 3: import 관계 파악 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "import 관계 탐색"))?;
+    if let Some(ref tf) = target_file {
+        if let Ok(fc) = std::fs::read_to_string(tf) {
+            let imports = extract_imports(&fc, tf);
+            for imp_path in imports {
+                if read_count >= max_reads { break; }
+                let candidate = if imp_path.is_absolute() { imp_path.clone() } else { base.join(&imp_path) };
+                if candidate.is_file() {
+                    if let Ok(imp_content) = std::fs::read_to_string(&candidate) {
+                        let rel = candidate.strip_prefix(base).unwrap_or(&candidate);
+                        let truncated: String = imp_content.lines().take(40).collect::<Vec<_>>().join("\n");
+                        context_parts.push(format!("## {} (import 관계)\n```\n{}\n```", rel.display(), truncated));
+                        read_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // === Step 4: 테스트 파일 탐색 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "테스트 파일 탐색"))?;
+    if let Some(ref tf) = target_file {
+        if let Some(test_file) = find_test_file(base, tf) {
+            if read_count < max_reads {
+                if let Ok(fc) = std::fs::read_to_string(&test_file) {
+                    let rel = test_file.strip_prefix(base).unwrap_or(&test_file);
+                    let truncated: String = fc.lines().take(40).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (테스트)\n```\n{}\n```", rel.display(), truncated));
+                    read_count += 1;
+                }
+            }
+        }
+    }
+
+    // === Step 5: Git diff ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Git 변경사항 확인"))?;
+    if let Some(ref tf) = target_file {
+        let rel = tf.strip_prefix(base).unwrap_or(tf);
+        if let Ok(output) = std::process::Command::new("git")
+            .args(["diff", &rel.to_string_lossy()])
+            .current_dir(base).output()
+        {
+            if output.status.success() {
+                let diff = String::from_utf8_lossy(&output.stdout);
+                if !diff.trim().is_empty() {
+                    context_parts.push(format!("## Git diff ({})\n```\n{}\n```", rel.display(), diff.trim()));
+                }
+            }
+        }
+    } else {
+        collect_git_status(base, &mut context_parts);
+    }
+
+    Ok((context_parts, read_count))
+}
+
+/// Deploy intent: 배포/인프라 설정 수집
+fn collect_deploy_context(
+    base: &std::path::Path,
+    _content: &str,
+    app: &mut TuiApp<'_>,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    progress_idx: usize,
+) -> Result<(Vec<String>, usize)> {
+    let mut context_parts: Vec<String> = Vec::new();
+    let mut read_count = 0;
+    let max_reads = 10;
+    let max_lines = 40;
+    let total_steps = 5;
+    let mut step = 0;
+
+    // === Step 1: 프로젝트 트리 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "프로젝트 구조 스캔"))?;
+    collect_project_tree(base, &mut context_parts);
+
+    // === Step 2: Dockerfile / docker-compose ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Docker 설정 탐색"))?;
+    let docker_files = ["Dockerfile", "docker-compose.yml", "docker-compose.yaml", "Dockerfile.prod", ".dockerignore"];
+    for name in &docker_files {
+        if read_count >= max_reads { break; }
+        // 루트 + 재귀 탐색
+        let mut found_all = Vec::new();
+        find_all_files_recursive(base, name, 3, &mut found_all);
+        for found in found_all {
+            if read_count >= max_reads { break; }
+            let rel = found.strip_prefix(base).unwrap_or(&found);
+            if let Ok(fc) = std::fs::read_to_string(&found) {
+                let truncated: String = fc.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (Docker)\n```\n{}\n```", rel.display(), truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // === Step 3: CI/CD 설정 ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "CI/CD 설정 탐색"))?;
+    // GitHub Actions
+    let ci_dirs = [".github/workflows", ".gitlab", "pipelines"];
+    for ci_dir in &ci_dirs {
+        let dir_path = base.join(ci_dir);
+        if dir_path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&dir_path) {
+                for entry in entries.flatten() {
+                    if read_count >= max_reads { break; }
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".yml") || name.ends_with(".yaml") {
+                        if let Ok(fc) = std::fs::read_to_string(entry.path()) {
+                            let truncated: String = fc.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+                            context_parts.push(format!("## {}/{} (CI/CD)\n```\n{}\n```", ci_dir, name, truncated));
+                            read_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Jenkinsfile, Makefile
+    for name in &["Jenkinsfile", "Makefile", "azure-pipelines.yml"] {
+        if read_count >= max_reads { break; }
+        let fp = base.join(name);
+        if fp.exists() {
+            if let Ok(fc) = std::fs::read_to_string(&fp) {
+                let truncated: String = fc.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (CI/CD)\n```\n{}\n```", name, truncated));
+                read_count += 1;
+            }
+        }
+    }
+
+    // === Step 4: k8s / Helm / Terraform ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "k8s/IaC 설정 탐색"))?;
+    let infra_dirs = ["k8s", "deploy", "manifests", "kubernetes", "helm", "charts", "terraform", "infra"];
+    for dir_name in &infra_dirs {
+        if read_count >= max_reads { break; }
+        if let Some(dir_path) = find_dir_recursive(base, dir_name, 2) {
+            if let Ok(entries) = std::fs::read_dir(&dir_path) {
+                for entry in entries.flatten() {
+                    if read_count >= max_reads { break; }
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(".yml") || name.ends_with(".yaml") || name.ends_with(".tf") || name.ends_with(".json") {
+                        if let Ok(fc) = std::fs::read_to_string(entry.path()) {
+                            let truncated: String = fc.lines().take(max_lines).collect::<Vec<_>>().join("\n");
+                            context_parts.push(format!("## {}/{} (인프라)\n```\n{}\n```", dir_name, name, truncated));
+                            read_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Step 5: 빌드 설정 + Git ===
+    step += 1;
+    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "빌드 설정 확인"))?;
+    let build_files = ["pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.xml", "build.gradle"];
+    for name in &build_files {
+        if read_count >= max_reads { break; }
+        let fp = base.join(name);
+        if fp.exists() {
+            if let Ok(fc) = std::fs::read_to_string(&fp) {
+                let truncated: String = fc.lines().take(30).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## {} (빌드 설정)\n```\n{}\n```", name, truncated));
+                read_count += 1;
+            }
+            break; // 하나만
+        }
+    }
+    collect_git_status(base, &mut context_parts);
+
+    Ok((context_parts, read_count))
+}
+
+// ============================================================
+// 공통 헬퍼 (수집 함수에서 공유)
+// ============================================================
+
+/// 스킵할 디렉토리 목록
+const SKIP_DIRS: &[&str] = &[
+    "node_modules", "target", "__pycache__", ".git", "venv", ".venv",
+    "dist", "build", "scripts", "tests", "docs", "patches", "static", "data",
+];
+
+/// 프로젝트 트리 (1 depth) 수집
+fn collect_project_tree(base: &std::path::Path, context_parts: &mut Vec<String>) {
+    if let Ok(entries) = std::fs::read_dir(base) {
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') { continue; }
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if !SKIP_DIRS.contains(&name.as_str()) {
+                    dirs.push(format!("  {}/", name));
+                }
+            } else {
+                files.push(format!("  {}", name));
+            }
+        }
+        dirs.sort();
+        files.sort();
+        context_parts.push(format!("## 프로젝트 트리\n```\n{}\n{}\n```", dirs.join("\n"), files.join("\n")));
+    }
+}
+
+/// Git 상태 수집 (최근 5커밋 + 현재 브랜치)
+fn collect_git_status(base: &std::path::Path, context_parts: &mut Vec<String>) {
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["log", "--oneline", "-5"])
+        .current_dir(base).output()
+    {
+        if output.status.success() {
+            let log = String::from_utf8_lossy(&output.stdout);
+            if !log.trim().is_empty() {
+                context_parts.push(format!("## Git 최근 커밋\n```\n{}\n```", log.trim()));
+            }
+        }
+    }
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(base).output()
+    {
+        if output.status.success() {
+            let branch = String::from_utf8_lossy(&output.stdout);
+            if !branch.trim().is_empty() {
+                context_parts.push(format!("현재 브랜치: `{}`", branch.trim()));
+            }
+        }
+    }
+}
+
+/// 소스 파일에서 import 경로 추출 (Python/Node/Rust)
+fn extract_imports(content: &str, file_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut imports = Vec::new();
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let parent = file_path.parent().unwrap_or(std::path::Path::new("."));
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        match ext {
+            "py" => {
+                // from xxx.yyy import zzz → xxx/yyy.py
+                if trimmed.starts_with("from ") {
+                    if let Some(module) = trimmed.strip_prefix("from ").and_then(|s| s.split_whitespace().next()) {
+                        if !module.starts_with('.') && !module.contains("stdlib") {
+                            let path = parent.join(module.replace('.', "/")).with_extension("py");
+                            imports.push(path);
+                        }
+                    }
+                }
+            }
+            "ts" | "js" | "tsx" | "jsx" => {
+                // import ... from './xxx' → xxx.ts
+                if trimmed.contains("from '") || trimmed.contains("from \"") {
+                    let parts: Vec<&str> = trimmed.split("from ").collect();
+                    if parts.len() > 1 {
+                        let module = parts[1].trim().trim_matches(|c| c == '\'' || c == '"' || c == ';');
+                        if module.starts_with('.') {
+                            let path = parent.join(module);
+                            // .ts, .tsx, .js 순서로 시도
+                            for try_ext in &["ts", "tsx", "js", "jsx"] {
+                                let candidate = path.with_extension(try_ext);
+                                if candidate.exists() {
+                                    imports.push(candidate);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    imports.truncate(5); // 최대 5개만
+    imports
+}
+
+/// 대상 파일에 대응하는 테스트 파일 찾기
+fn find_test_file(base: &std::path::Path, file_path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let stem = file_path.file_stem()?.to_str()?;
+    let ext = file_path.extension()?.to_str()?;
+
+    let test_names: Vec<String> = match ext {
+        "py" => vec![format!("test_{}.py", stem), format!("{}_test.py", stem)],
+        "ts" | "tsx" => vec![format!("{}.test.ts", stem), format!("{}.test.tsx", stem), format!("{}.spec.ts", stem)],
+        "js" | "jsx" => vec![format!("{}.test.js", stem), format!("{}.test.jsx", stem), format!("{}.spec.js", stem)],
+        "rs" => vec![format!("{}_test.rs", stem)],
+        "go" => vec![format!("{}_test.go", stem)],
+        "java" | "kt" => vec![format!("{}Test.java", stem), format!("{}Test.kt", stem)],
+        _ => return None,
+    };
+
+    // 같은 디렉토리에서 먼저 찾기
+    if let Some(parent) = file_path.parent() {
+        for name in &test_names {
+            let candidate = parent.join(name);
+            if candidate.exists() { return Some(candidate); }
+        }
+    }
+
+    // tests/ 디렉토리에서 찾기
+    for name in &test_names {
+        if let Some(found) = find_file_recursive(base, name, 3) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+/// 지정한 확장자 중 가장 큰 파일 찾기 (k8s manifest 등)
+fn find_biggest_file_any(dir: &std::path::Path, exts: &[&str]) -> Option<std::path::PathBuf> {
+    let mut biggest: Option<(std::path::PathBuf, u64)> = None;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() { continue; }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !exts.contains(&ext) { continue; }
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let size = meta.len();
+                if biggest.as_ref().map_or(true, |(_, s)| size > *s) {
+                    biggest = Some((path, size));
+                }
+            }
+        }
+    }
+    biggest.map(|(p, _)| p)
 }
 
 /// 메시지에서 경로 추출

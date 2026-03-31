@@ -355,6 +355,12 @@ impl Agent {
         pm.add_system_prompt_extra(key, context);
     }
 
+    /// 시스템 프롬프트에서 컨텍스트 제거
+    pub async fn remove_system_context(&self, key: &str) -> Option<String> {
+        let mut pm = self.prompt_manager.lock().await;
+        pm.remove_system_prompt_extra(key)
+    }
+
     /// Message의 텍스트 콘텐츠 마스킹
     pub async fn mask_message(&self, message: &Message) -> Message {
         self.mask_message_with_info(message).await.0

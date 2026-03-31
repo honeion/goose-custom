@@ -247,6 +247,12 @@ impl PromptManager {
         self.system_prompt_extras.insert(key, instruction);
     }
 
+    /// Remove an additional instruction from the system prompt by key
+    /// Returns the removed value if the key existed
+    pub fn remove_system_prompt_extra(&mut self, key: &str) -> Option<String> {
+        self.system_prompt_extras.shift_remove(key)
+    }
+
     /// Override the system prompt with custom text
     pub fn set_system_prompt_override(&mut self, template: String) {
         self.system_prompt_override = Some(template);
