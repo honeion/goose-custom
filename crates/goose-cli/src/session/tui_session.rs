@@ -1177,7 +1177,7 @@ fn collect_analyze_context(
 ) -> Result<(Vec<String>, usize)> {
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
-    let max_lines_per_file = 30;
+    let max_lines_per_file = 50;
     let total_steps = 7;
     let mut step = 0;
 
@@ -1542,14 +1542,27 @@ fn collect_debug_context(
     // === Step 4: 환경 설정 (LLM이 런타임 로그 확인할 때 필요) ===
     step += 1;
     update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "환경 설정 수집"))?;
-    let env_files = ["docker-compose.yml", "docker-compose.yaml", "Dockerfile", ".env.example"];
-    for name in &env_files {
-        if read_count >= max_reads { break; }
-        if let Some(found) = find_file_recursive(base, name, 3) {
-            let rel = found.strip_prefix(base).unwrap_or(&found);
-            if let Ok(fc) = std::fs::read_to_string(&found) {
-                let truncated: String = fc.lines().take(40).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (환경설정)\n```\n{}\n```", rel.display(), truncated));
+    // Docker/compose 접두사 매칭 + .env.example
+    let docker_prefixes = ["Dockerfile", "docker-compose"];
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for entry in entries.flatten() {
+            if read_count >= max_reads { break; }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.path().is_file() && docker_prefixes.iter().any(|p| name.starts_with(p)) {
+                if let Ok(fc) = std::fs::read_to_string(entry.path()) {
+                    let truncated: String = fc.lines().take(40).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (환경설정)\n```\n{}\n```", name, truncated));
+                    read_count += 1;
+                }
+            }
+        }
+    }
+    if read_count < max_reads {
+        let env_example = base.join(".env.example");
+        if env_example.exists() {
+            if let Ok(fc) = std::fs::read_to_string(&env_example) {
+                let truncated: String = fc.lines().take(30).collect::<Vec<_>>().join("\n");
+                context_parts.push(format!("## .env.example (환경변수)\n```\n{}\n```", truncated));
                 read_count += 1;
             }
         }
@@ -1730,21 +1743,24 @@ fn collect_deploy_context(
     update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "프로젝트 구조 스캔"))?;
     collect_project_tree(base, &mut context_parts);
 
-    // === Step 2: Dockerfile / docker-compose ===
+    // === Step 2: Dockerfile / docker-compose (접두사 매칭) ===
     step += 1;
     update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Docker 설정 탐색"))?;
-    let docker_files = ["Dockerfile", "docker-compose.yml", "docker-compose.yaml", "Dockerfile.prod", ".dockerignore"];
-    for name in &docker_files {
-        if read_count >= max_reads { break; }
-        // 루트 + 재귀 탐색
-        let mut found_all = Vec::new();
-        find_all_files_recursive(base, name, 3, &mut found_all);
-        for found in found_all {
+    let docker_prefixes = ["Dockerfile", "docker-compose"];
+    if let Ok(entries) = std::fs::read_dir(base) {
+        let mut docker_files: Vec<_> = entries.flatten()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                e.path().is_file() && docker_prefixes.iter().any(|p| name.starts_with(p))
+            })
+            .collect();
+        docker_files.sort_by_key(|e| e.file_name());
+        for entry in docker_files {
             if read_count >= max_reads { break; }
-            let rel = found.strip_prefix(base).unwrap_or(&found);
-            if let Ok(fc) = std::fs::read_to_string(&found) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Ok(fc) = std::fs::read_to_string(entry.path()) {
                 let truncated: String = fc.lines().take(max_lines).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (Docker)\n```\n{}\n```", rel.display(), truncated));
+                context_parts.push(format!("## {} (Docker)\n```\n{}\n```", name, truncated));
                 read_count += 1;
             }
         }
