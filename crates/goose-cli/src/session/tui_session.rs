@@ -952,8 +952,8 @@ async fn collect_context_with_progress(
 
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
-    let max_reads = 6;
-    let max_lines_per_file = 40;
+    let max_reads = 10;
+    let max_lines_per_file = 30;
 
     // === Step 1: 프로젝트 트리 ===
     step += 1;
@@ -977,10 +977,12 @@ async fn collect_context_with_progress(
         context_parts.push(format!("## 프로젝트 트리\n```\n{}\n{}\n```", dirs.join("\n"), files.join("\n")));
     }
 
-    // === Step 2: 문서 파일 ===
+    // === Step 2: 문서 + 의존성 읽기 & 언어 감지 ===
     step += 1;
-    let doc_files = ["README.md", "CLAUDE.md", "readme.md"];
-    for name in &doc_files {
+    let mut detected_lang = "unknown";
+
+    // 문서 파일
+    for name in &["README.md", "CLAUDE.md", "readme.md"] {
         if read_count >= max_reads { break; }
         let file_path = base.join(name);
         if file_path.exists() {
@@ -993,42 +995,94 @@ async fn collect_context_with_progress(
         }
     }
 
-    // === Step 3: 의존성 파일 ===
+    // 의존성 파일 → 언어 감지
+    let dep_lang_map: &[(&str, &str)] = &[
+        ("requirements.txt", "python"), ("pyproject.toml", "python"), ("setup.py", "python"),
+        ("package.json", "node"), ("tsconfig.json", "node"),
+        ("Cargo.toml", "rust"),
+        ("go.mod", "go"),
+        ("pom.xml", "java"), ("build.gradle", "java"), ("build.gradle.kts", "kotlin"),
+        ("*.csproj", "dotnet"), ("*.sln", "dotnet"),
+        ("Gemfile", "ruby"),
+    ];
+
     step += 1;
-    let dep_files = ["requirements.txt", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.xml"];
-    for name in &dep_files {
+    for (dep_file, lang) in dep_lang_map {
         if read_count >= max_reads { break; }
-        let file_path = base.join(name);
-        if file_path.exists() {
-            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
-            if let Ok(file_content) = std::fs::read_to_string(&file_path) {
-                let truncated: String = file_content.lines().take(80).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (의존성)\n```\n{}\n```", name, truncated));
-                read_count += 1;
+        if dep_file.starts_with('*') {
+            // 글로브 패턴
+            let ext = dep_file.trim_start_matches('*');
+            if let Ok(entries) = std::fs::read_dir(base) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.ends_with(ext) {
+                        detected_lang = lang;
+                        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
+                        if let Ok(c) = std::fs::read_to_string(entry.path()) {
+                            let t: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
+                            context_parts.push(format!("## {} (의존성/{})\n```\n{}\n```", name, lang, t));
+                            read_count += 1;
+                        }
+                        break;
+                    }
+                }
+            }
+        } else {
+            let file_path = base.join(dep_file);
+            if file_path.exists() {
+                detected_lang = lang;
+                update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", dep_file)))?;
+                if let Ok(c) = std::fs::read_to_string(&file_path) {
+                    let t: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (의존성/{})\n```\n{}\n```", dep_file, lang, t));
+                    read_count += 1;
+                }
             }
         }
     }
 
-    // === Step 4: 엔트리포인트 ===
+    // === Step 4: 언어별 엔트리포인트 탐색 ===
     step += 1;
-    let entry_files = ["main.py", "app.py", "manage.py", "main.rs", "lib.rs", "index.ts", "app.ts", "main.go", "Main.java"];
-    for name in &entry_files {
+    let entry_names: Vec<&str> = match detected_lang {
+        "python" => vec!["main.py", "app.py", "manage.py", "wsgi.py", "__main__.py"],
+        "node" => vec!["index.ts", "index.js", "app.ts", "app.js", "server.ts", "server.js", "main.tsx", "App.tsx", "App.vue"],
+        "rust" => vec!["main.rs", "lib.rs"],
+        "go" => vec!["main.go"],
+        "java" => vec!["Application.java", "Main.java", "App.java"],
+        "kotlin" => vec!["Application.kt", "Main.kt"],
+        "dotnet" => vec!["Program.cs", "Startup.cs"],
+        "ruby" => vec!["config.ru", "app.rb"],
+        _ => vec!["main.py", "app.py", "main.rs", "index.ts", "main.go", "Program.cs", "Application.java"],
+    };
+    let mut found_entries = Vec::new();
+    for name in &entry_names {
+        find_all_files_recursive(base, name, 4, &mut found_entries);
+    }
+    found_entries.sort();
+    found_entries.dedup();
+    for found in &found_entries {
         if read_count >= max_reads { break; }
-        if let Some(found) = find_file_recursive(base, name, 3) {
-            let rel_path = found.strip_prefix(base).unwrap_or(&found);
-            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
-            if let Ok(file_content) = std::fs::read_to_string(&found) {
-                let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
-                context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
-                read_count += 1;
-            }
+        let rel_path = found.strip_prefix(base).unwrap_or(found);
+        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+        if let Ok(file_content) = std::fs::read_to_string(found) {
+            let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
+            context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
+            read_count += 1;
         }
     }
 
-    // === Step 5: 설정 파일 ===
+    // === Step 5: 언어별 설정 파일 ===
     step += 1;
-    let config_files = ["config.py", "settings.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"];
-    for name in &config_files {
+    let config_names: Vec<&str> = match detected_lang {
+        "python" => vec!["config.py", "settings.py", ".env.example", "docker-compose.yml"],
+        "node" => vec!["vite.config.ts", "next.config.js", "webpack.config.js", ".env.example", "docker-compose.yml"],
+        "rust" => vec!["config.rs", ".env.example", "docker-compose.yml"],
+        "go" => vec!["config.go", "config.yaml", ".env.example", "docker-compose.yml"],
+        "java" | "kotlin" => vec!["application.yml", "application.properties", "docker-compose.yml"],
+        "dotnet" => vec!["appsettings.json", "appsettings.Development.json", "docker-compose.yml"],
+        _ => vec!["config.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"],
+    };
+    for name in &config_names {
         if read_count >= max_reads { break; }
         if let Some(found) = find_file_recursive(base, name, 3) {
             let rel_path = found.strip_prefix(base).unwrap_or(&found);
@@ -1041,14 +1095,49 @@ async fn collect_context_with_progress(
         }
     }
 
-    // === Step 6: 핵심 코드 디렉토리 ===
+    // === Step 6: 언어별 핵심 코드 디렉토리 ===
     step += 1;
-    let code_patterns = [
-        ("routes", "라우터/API"), ("router", "라우터/API"), ("api", "라우터/API"),
-        ("services", "서비스"), ("service", "서비스"),
-        ("models", "데이터 모델"), ("model", "데이터 모델"),
-        ("orchestrator", "오케스트레이터"), ("handlers", "핸들러"),
-    ];
+    let code_patterns: Vec<(&str, &str)> = match detected_lang {
+        "python" => vec![
+            ("routers", "라우터"), ("router", "라우터"), ("api", "API"),
+            ("services", "서비스"), ("service", "서비스"),
+            ("models", "모델"), ("schemas", "스키마"),
+            ("orchestrator", "오케스트레이터"), ("handlers", "핸들러"),
+            ("core", "코어"), ("middleware", "미들웨어"),
+        ],
+        "node" => vec![
+            ("routes", "라우터"), ("pages", "페이지"), ("views", "뷰"),
+            ("components", "컴포넌트"), ("services", "서비스"),
+            ("models", "모델"), ("lib", "라이브러리"),
+            ("hooks", "훅"), ("store", "상태관리"), ("middleware", "미들웨어"),
+        ],
+        "java" | "kotlin" => vec![
+            ("controller", "컨트롤러"), ("controllers", "컨트롤러"),
+            ("service", "서비스"), ("services", "서비스"),
+            ("repository", "레포지토리"), ("model", "모델"), ("entity", "엔티티"),
+            ("config", "설정"), ("dto", "DTO"),
+        ],
+        "go" => vec![
+            ("handler", "핸들러"), ("handlers", "핸들러"),
+            ("service", "서비스"), ("services", "서비스"),
+            ("model", "모델"), ("router", "라우터"),
+            ("middleware", "미들웨어"), ("cmd", "커맨드"),
+        ],
+        "dotnet" => vec![
+            ("Controllers", "컨트롤러"), ("Services", "서비스"),
+            ("Models", "모델"), ("Data", "데이터"),
+            ("Middleware", "미들웨어"), ("Hubs", "허브"),
+        ],
+        "rust" => vec![
+            ("routes", "라우터"), ("handlers", "핸들러"),
+            ("services", "서비스"), ("models", "모델"),
+        ],
+        _ => vec![
+            ("routes", "라우터"), ("services", "서비스"),
+            ("models", "모델"), ("handlers", "핸들러"),
+            ("controllers", "컨트롤러"), ("core", "코어"),
+        ],
+    };
     for (dir_name, label) in &code_patterns {
         if read_count >= max_reads { break; }
         if let Some(dir_path) = find_dir_recursive(base, dir_name, 3) {
@@ -1190,8 +1279,8 @@ async fn detect_and_augment_intent(content: &str) -> String {
     let config_files = ["config.py", "settings.py", "config.ts", "config.rs", ".env.example", "docker-compose.yml"];
 
     let mut read_count = 0;
-    let max_reads = 6;
-    let max_lines_per_file = 40;
+    let max_reads = 10;
+    let max_lines_per_file = 30;
 
     // 문서 파일
     for name in &doc_files {
@@ -1387,6 +1476,31 @@ fn find_biggest_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         }
     }
     biggest.map(|(p, _)| p)
+}
+
+/// 파일 이름으로 모든 매치를 재귀 탐색
+fn find_all_files_recursive(dir: &std::path::Path, name: &str, max_depth: usize, results: &mut Vec<std::path::PathBuf>) {
+    find_all_files_recursive_inner(dir, name, 0, max_depth, results);
+}
+
+fn find_all_files_recursive_inner(dir: &std::path::Path, name: &str, depth: usize, max_depth: usize, results: &mut Vec<std::path::PathBuf>) {
+    if depth > max_depth { return; }
+    let skip = ["node_modules", "target", "__pycache__", ".git", "venv", ".venv", "dist", "build", "scripts", "tests", "docs", "patches", "static", "data"];
+
+    let direct = dir.join(name);
+    if direct.exists() {
+        results.push(direct);
+    }
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if skip.contains(&dir_name.as_str()) || dir_name.starts_with('.') { continue; }
+                find_all_files_recursive_inner(&entry.path(), name, depth + 1, max_depth, results);
+            }
+        }
+    }
 }
 
 fn find_file_recursive_inner(dir: &std::path::Path, name: &str, depth: usize, max_depth: usize) -> Option<std::path::PathBuf> {
