@@ -457,14 +457,123 @@ fn tokenize_and_style(
     vec![Span::styled(word.to_string(), style)]
 }
 
+/// 테이블 줄인지 감지 (| 로 시작하고 | 포함)
+fn is_table_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() > 2
+}
+
+/// 테이블 구분선인지 감지 (|---|---|)
+fn is_table_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.contains("---")
+}
+
+/// 테이블 셀 파싱
+fn parse_table_cells(line: &str) -> Vec<String> {
+    line.trim().trim_matches('|')
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .collect()
+}
+
+/// 테이블 렌더링
+fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'static>> {
+    let mut result = Vec::new();
+    if table_lines.is_empty() { return result; }
+
+    // 모든 셀 파싱 + 컬럼 너비 계산
+    let mut all_rows: Vec<Vec<String>> = Vec::new();
+    let mut col_widths: Vec<usize> = Vec::new();
+    let mut header_idx: Option<usize> = None;
+
+    for (i, line) in table_lines.iter().enumerate() {
+        if is_table_separator(line) {
+            header_idx = Some(i);
+            continue;
+        }
+        let cells = parse_table_cells(line);
+        for (j, cell) in cells.iter().enumerate() {
+            if j >= col_widths.len() {
+                col_widths.push(cell.len());
+            } else if cell.len() > col_widths[j] {
+                col_widths[j] = cell.len();
+            }
+        }
+        all_rows.push(cells);
+    }
+
+    // 최소 너비
+    for w in col_widths.iter_mut() {
+        *w = (*w).max(3);
+    }
+
+    let header_style = styles.bold;
+    let cell_style = styles.text;
+    let border_style = Style::default().fg(Color::DarkGray);
+
+    // 상단 테두리
+    let top_border: String = col_widths.iter()
+        .map(|w| "─".repeat(w + 2))
+        .collect::<Vec<_>>()
+        .join("┬");
+    result.push(Line::from(Span::styled(format!("  ┌{}┐", top_border), border_style)));
+
+    for (i, row) in all_rows.iter().enumerate() {
+        let style = if i == 0 && header_idx.is_some() { header_style } else { cell_style };
+        let mut spans = vec![Span::styled("  │", border_style)];
+        for (j, cell) in row.iter().enumerate() {
+            let width = col_widths.get(j).copied().unwrap_or(3);
+            spans.push(Span::styled(format!(" {:width$} ", cell, width = width), style));
+            spans.push(Span::styled("│", border_style));
+        }
+        // 누락된 셀 채우기
+        for j in row.len()..col_widths.len() {
+            let width = col_widths[j];
+            spans.push(Span::styled(format!(" {:width$} ", "", width = width), cell_style));
+            spans.push(Span::styled("│", border_style));
+        }
+        result.push(Line::from(spans));
+
+        // 헤더 뒤 구분선
+        if i == 0 && header_idx.is_some() {
+            let sep: String = col_widths.iter()
+                .map(|w| "─".repeat(w + 2))
+                .collect::<Vec<_>>()
+                .join("┼");
+            result.push(Line::from(Span::styled(format!("  ├{}┤", sep), border_style)));
+        }
+    }
+
+    // 하단 테두리
+    let bottom_border: String = col_widths.iter()
+        .map(|w| "─".repeat(w + 2))
+        .collect::<Vec<_>>()
+        .join("┴");
+    result.push(Line::from(Span::styled(format!("  └{}┘", bottom_border), border_style)));
+
+    result
+}
+
 /// 전체 텍스트를 마크다운으로 파싱하여 Line 목록 반환
 pub fn parse_markdown(text: &str, styles: &MdStyles) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut in_code_block = false;
     let mut code_lang = String::new();
     let mut code_lines: Vec<String> = Vec::new();
+    let mut table_lines: Vec<String> = Vec::new();
 
     for line in text.lines() {
+        // 테이블 처리
+        if !in_code_block && is_table_line(line) {
+            table_lines.push(line.to_string());
+            continue;
+        } else if !table_lines.is_empty() {
+            // 테이블 종료 → 렌더링
+            lines.extend(render_table(&table_lines, styles));
+            table_lines.clear();
+        }
+
         if let Some(lang) = is_code_block_delimiter(line) {
             if in_code_block {
                 // 코드 블록 종료 - 구문 강조 적용하여 렌더링
@@ -499,6 +608,11 @@ pub fn parse_markdown(text: &str, styles: &MdStyles) -> Vec<Line<'static>> {
         } else {
             lines.push(Line::from(parse_line(line, styles)));
         }
+    }
+
+    // 미완료 테이블 처리
+    if !table_lines.is_empty() {
+        lines.extend(render_table(&table_lines, styles));
     }
 
     // 미완료 코드 블록 처리

@@ -1098,24 +1098,23 @@ async fn collect_context_with_progress(
         .and_then(|n| n.to_str())
         .unwrap_or("project");
 
-    // 진행 메시지 초기화
-    app.add_system_message(make_progress_bar(0, 7, &format!("{} {} 준비", short_name, intent.label())));
+    // 진행 표시 — 도구 상태바 사용 (대화 흐름 안 끊김)
+    app.start_tool(format!("{} {} 준비", short_name, intent.label()));
     terminal.draw(|frame| app.render(frame))?;
-    let progress_idx = app.messages.len() - 1;
 
     // Intent별 수집 디스패치
     let (context_parts, read_count) = match intent {
-        UserIntent::Analyze => collect_analyze_context(base, content, "unknown", app, terminal, progress_idx)?,
-        UserIntent::Debug => collect_debug_context(base, content, app, terminal, progress_idx)?,
-        UserIntent::Modify => collect_modify_context(base, content, app, terminal, progress_idx)?,
-        UserIntent::Deploy => collect_deploy_context(base, content, app, terminal, progress_idx)?,
+        UserIntent::Analyze => collect_analyze_context(base, content, "unknown", app, terminal)?,
+        UserIntent::Debug => collect_debug_context(base, content, app, terminal)?,
+        UserIntent::Modify => collect_modify_context(base, content, app, terminal)?,
+        UserIntent::Deploy => collect_deploy_context(base, content, app, terminal)?,
     };
 
     // 프리-LLM 평가: 수집 파일이 너무 적으면 Analyze로 폴백 (1회)
     let (final_parts, final_count) = if read_count < 5 && intent != UserIntent::Analyze {
-        update_progress(app, terminal, progress_idx,
-            &make_progress_bar(3, 7, "수집 부족 — 프로젝트 분석으로 보충"))?;
-        let (mut extra_parts, extra_count) = collect_analyze_context(base, content, "unknown", app, terminal, progress_idx)?;
+        app.update_tool_step("수집 부족 — 프로젝트 분석으로 보충", 0.5);
+        terminal.draw(|frame| app.render(frame))?;
+        let (mut extra_parts, extra_count) = collect_analyze_context(base, content, "unknown", app, terminal)?;
         let mut combined = context_parts;
         combined.append(&mut extra_parts);
         (combined, read_count + extra_count)
@@ -1124,8 +1123,8 @@ async fn collect_context_with_progress(
     };
 
     // 완료 표시
-    update_progress(app, terminal, progress_idx,
-        &format!("◉ ━━━━━━━━━━━━━━━━━━━━ [100%] — {}개 파일 수집 완료, AI 분석 중...", final_count))?;
+    app.finish_tool();
+    terminal.draw(|frame| app.render(frame))?;
 
     if final_parts.is_empty() {
         return Ok(None);
@@ -1161,6 +1160,20 @@ fn update_progress(
     Ok(())
 }
 
+/// 도구 상태바에 단계 업데이트 + 리드로우
+fn tool_step(
+    app: &mut TuiApp<'_>,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    step: usize,
+    total: usize,
+    step_name: &str,
+) -> Result<()> {
+    let progress = step as f64 / total.max(1) as f64;
+    app.update_tool_step(&format!("{}/{} {}", step, total, step_name), progress);
+    terminal.draw(|frame| app.render(frame))?;
+    Ok(())
+}
+
 /// 프로그레스 바 생성
 fn make_progress_bar(current: usize, total: usize, step_name: &str) -> String {
     let pct = if total > 0 { current * 100 / total } else { 0 };
@@ -1187,7 +1200,6 @@ fn collect_analyze_context(
     detected_lang: &str,
     app: &mut TuiApp<'_>,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    progress_idx: usize,
 ) -> Result<(Vec<String>, usize)> {
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
@@ -1197,7 +1209,7 @@ fn collect_analyze_context(
 
     // === Step 1: 프로젝트 트리 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "디렉토리 구조 스캔"))?;
+    tool_step(app, terminal, step, total_steps, "디렉토리 구조 스캔")?;
     if let Ok(entries) = std::fs::read_dir(base) {
         let mut dirs = Vec::new();
         let mut files = Vec::new();
@@ -1223,7 +1235,7 @@ fn collect_analyze_context(
         if read_count >= 10 { break; }
         let file_path = base.join(name);
         if file_path.exists() {
-            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
+            tool_step(app, terminal, step, total_steps, &format!("{}", name))?;
             if let Ok(file_content) = std::fs::read_to_string(&file_path) {
                 let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                 context_parts.push(format!("## {} (문서)\n```\n{}\n```", name, truncated));
@@ -1253,7 +1265,7 @@ fn collect_analyze_context(
                     let name = entry.file_name().to_string_lossy().to_string();
                     if name.ends_with(ext) {
                         lang = dep_lang.to_string();
-                        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", name)))?;
+                        tool_step(app, terminal, step, total_steps, &format!("{}", name))?;
                         if let Ok(c) = std::fs::read_to_string(entry.path()) {
                             let t: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
                             context_parts.push(format!("## {} (의존성/{})\n```\n{}\n```", name, dep_lang, t));
@@ -1267,7 +1279,7 @@ fn collect_analyze_context(
             let file_path = base.join(dep_file);
             if file_path.exists() {
                 lang = dep_lang.to_string();
-                update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", dep_file)))?;
+                tool_step(app, terminal, step, total_steps, &format!("{}", dep_file))?;
                 if let Ok(c) = std::fs::read_to_string(&file_path) {
                     let t: String = c.lines().take(50).collect::<Vec<_>>().join("\n");
                     context_parts.push(format!("## {} (의존성/{})\n```\n{}\n```", dep_file, dep_lang, t));
@@ -1312,7 +1324,7 @@ fn collect_analyze_context(
 
     if is_multi_service {
         // 멀티서비스 모드: 서비스 맵 생성
-        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "멀티서비스 감지"))?;
+        tool_step(app, terminal, step, total_steps, "멀티서비스 감지")?;
 
         // 사용자가 특정 서비스를 언급했는지 확인 (퍼지 매칭: 언더스코어/하이픈 무시)
         let normalize = |s: &str| -> String {
@@ -1332,7 +1344,7 @@ fn collect_analyze_context(
             for entry_path in found_entries.iter().filter(|p| p.starts_with(&service_base)) {
                 if read_count >= max_reads { break; }
                 let rel_path = entry_path.strip_prefix(base).unwrap_or(entry_path);
-                update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+                tool_step(app, terminal, step, total_steps, &format!("{}", rel_path.display()))?;
                 if let Ok(fc) = std::fs::read_to_string(entry_path) {
                     let truncated: String = fc.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                     context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
@@ -1369,7 +1381,7 @@ fn collect_analyze_context(
         for found in &found_entries {
             if read_count >= 10 { break; }
             let rel_path = found.strip_prefix(base).unwrap_or(found);
-            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+            tool_step(app, terminal, step, total_steps, &format!("{}", rel_path.display()))?;
             if let Ok(file_content) = std::fs::read_to_string(found) {
                 let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                 context_parts.push(format!("## {} (엔트리포인트)\n```\n{}\n```", rel_path.display(), truncated));
@@ -1394,7 +1406,7 @@ fn collect_analyze_context(
         if read_count >= max_reads_limit { break; }
         if let Some(found) = find_file_recursive(base, name, 3) {
             let rel_path = found.strip_prefix(base).unwrap_or(&found);
-            update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+            tool_step(app, terminal, step, total_steps, &format!("{}", rel_path.display()))?;
             if let Ok(file_content) = std::fs::read_to_string(&found) {
                 let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                 context_parts.push(format!("## {} (설정)\n```\n{}\n```", rel_path.display(), truncated));
@@ -1452,7 +1464,7 @@ fn collect_analyze_context(
             if let Some(dir_path) = find_dir_recursive(base, dir_name, 3) {
                 if let Some(biggest) = find_biggest_file(&dir_path) {
                     let rel_path = biggest.strip_prefix(base).unwrap_or(&biggest);
-                    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, &format!("{}", rel_path.display())))?;
+                    tool_step(app, terminal, step, total_steps, &format!("{}", rel_path.display()))?;
                     if let Ok(file_content) = std::fs::read_to_string(&biggest) {
                         let truncated: String = file_content.lines().take(max_lines_per_file).collect::<Vec<_>>().join("\n");
                         context_parts.push(format!("## {} — {} (핵심 코드)\n```\n{}\n```", rel_path.display(), label, truncated));
@@ -1462,12 +1474,12 @@ fn collect_analyze_context(
             }
         }
     } else {
-        update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "멀티서비스 — 핵심코드 스킵"))?;
+        tool_step(app, terminal, step, total_steps, "멀티서비스 — 핵심코드 스킵")?;
     }
 
     // === Step 7: Git 상태 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Git 상태 확인"))?;
+    tool_step(app, terminal, step, total_steps, "Git 상태 확인")?;
     collect_git_status(base, &mut context_parts);
 
     Ok((context_parts, read_count))
@@ -1479,7 +1491,6 @@ fn collect_debug_context(
     content: &str,
     app: &mut TuiApp<'_>,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    progress_idx: usize,
 ) -> Result<(Vec<String>, usize)> {
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
@@ -1490,12 +1501,12 @@ fn collect_debug_context(
 
     // === Step 1: 프로젝트 트리 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "프로젝트 구조 스캔"))?;
+    tool_step(app, terminal, step, total_steps, "프로젝트 구조 스캔")?;
     collect_project_tree(base, &mut context_parts);
 
     // === Step 2: 사용자가 언급한 파일 읽기 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "관련 파일 탐색"))?;
+    tool_step(app, terminal, step, total_steps, "관련 파일 탐색")?;
     if let Some(mentioned_path) = extract_path_from_message(content) {
         let p = std::path::Path::new(&mentioned_path);
         if p.is_file() {
@@ -1510,7 +1521,7 @@ fn collect_debug_context(
 
     // === Step 3: 로그 파일 탐색 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "로그 파일 탐색"))?;
+    tool_step(app, terminal, step, total_steps, "로그 파일 탐색")?;
     let log_patterns = ["*.log", "*.err"];
     for pattern in &log_patterns {
         if read_count >= max_reads { break; }
@@ -1555,7 +1566,7 @@ fn collect_debug_context(
 
     // === Step 4: 환경 설정 (LLM이 런타임 로그 확인할 때 필요) ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "환경 설정 수집"))?;
+    tool_step(app, terminal, step, total_steps, "환경 설정 수집")?;
     // Docker/compose 접두사 매칭 + .env.example
     let docker_prefixes = ["Dockerfile", "docker-compose"];
     if let Ok(entries) = std::fs::read_dir(base) {
@@ -1598,7 +1609,7 @@ fn collect_debug_context(
 
     // === Step 5: Git diff (unstaged) + 최근 커밋 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Git 변경사항 확인"))?;
+    tool_step(app, terminal, step, total_steps, "Git 변경사항 확인")?;
     if let Ok(output) = std::process::Command::new("git")
         .args(["diff", "--stat"])
         .current_dir(base).output()
@@ -1622,7 +1633,7 @@ fn collect_debug_context(
 
     // === Step 6: 의존성 파일 (에러 원인 파악용) ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "의존성 확인"))?;
+    tool_step(app, terminal, step, total_steps, "의존성 확인")?;
     let dep_files = ["requirements.txt", "pyproject.toml", "package.json", "Cargo.toml", "go.mod"];
     for name in &dep_files {
         if read_count >= max_reads { break; }
@@ -1646,7 +1657,6 @@ fn collect_modify_context(
     content: &str,
     app: &mut TuiApp<'_>,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    progress_idx: usize,
 ) -> Result<(Vec<String>, usize)> {
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
@@ -1657,12 +1667,12 @@ fn collect_modify_context(
 
     // === Step 1: 프로젝트 트리 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "프로젝트 구조 스캔"))?;
+    tool_step(app, terminal, step, total_steps, "프로젝트 구조 스캔")?;
     collect_project_tree(base, &mut context_parts);
 
     // === Step 2: 사용자가 지정한 파일 읽기 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "대상 파일 읽기"))?;
+    tool_step(app, terminal, step, total_steps, "대상 파일 읽기")?;
     let mut target_file: Option<std::path::PathBuf> = None;
     if let Some(mentioned_path) = extract_path_from_message(content) {
         let p = std::path::Path::new(&mentioned_path);
@@ -1679,7 +1689,7 @@ fn collect_modify_context(
 
     // === Step 3: import 관계 파악 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "import 관계 탐색"))?;
+    tool_step(app, terminal, step, total_steps, "import 관계 탐색")?;
     if let Some(ref tf) = target_file {
         if let Ok(fc) = std::fs::read_to_string(tf) {
             let imports = extract_imports(&fc, tf);
@@ -1700,7 +1710,7 @@ fn collect_modify_context(
 
     // === Step 4: 테스트 파일 탐색 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "테스트 파일 탐색"))?;
+    tool_step(app, terminal, step, total_steps, "테스트 파일 탐색")?;
     if let Some(ref tf) = target_file {
         if let Some(test_file) = find_test_file(base, tf) {
             if read_count < max_reads {
@@ -1716,7 +1726,7 @@ fn collect_modify_context(
 
     // === Step 5: Git diff ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Git 변경사항 확인"))?;
+    tool_step(app, terminal, step, total_steps, "Git 변경사항 확인")?;
     if let Some(ref tf) = target_file {
         let rel = tf.strip_prefix(base).unwrap_or(tf);
         if let Ok(output) = std::process::Command::new("git")
@@ -1743,7 +1753,6 @@ fn collect_deploy_context(
     _content: &str,
     app: &mut TuiApp<'_>,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    progress_idx: usize,
 ) -> Result<(Vec<String>, usize)> {
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
@@ -1754,12 +1763,12 @@ fn collect_deploy_context(
 
     // === Step 1: 프로젝트 트리 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "프로젝트 구조 스캔"))?;
+    tool_step(app, terminal, step, total_steps, "프로젝트 구조 스캔")?;
     collect_project_tree(base, &mut context_parts);
 
     // === Step 2: Dockerfile / docker-compose (접두사 매칭) ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "Docker 설정 탐색"))?;
+    tool_step(app, terminal, step, total_steps, "Docker 설정 탐색")?;
     let docker_prefixes = ["Dockerfile", "docker-compose"];
     if let Ok(entries) = std::fs::read_dir(base) {
         let mut docker_files: Vec<_> = entries.flatten()
@@ -1782,7 +1791,7 @@ fn collect_deploy_context(
 
     // === Step 3: CI/CD 설정 ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "CI/CD 설정 탐색"))?;
+    tool_step(app, terminal, step, total_steps, "CI/CD 설정 탐색")?;
     // GitHub Actions
     let ci_dirs = [".github/workflows", ".gitlab", "pipelines"];
     for ci_dir in &ci_dirs {
@@ -1818,7 +1827,7 @@ fn collect_deploy_context(
 
     // === Step 4: k8s / Helm / Terraform ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "k8s/IaC 설정 탐색"))?;
+    tool_step(app, terminal, step, total_steps, "k8s/IaC 설정 탐색")?;
     let infra_dirs = ["k8s", "deploy", "manifests", "kubernetes", "helm", "charts", "terraform", "infra"];
     for dir_name in &infra_dirs {
         if read_count >= max_reads { break; }
@@ -1841,7 +1850,7 @@ fn collect_deploy_context(
 
     // === Step 5: 빌드 설정 + Git ===
     step += 1;
-    update_progress(app, terminal, progress_idx, &make_progress_bar(step, total_steps, "빌드 설정 확인"))?;
+    tool_step(app, terminal, step, total_steps, "빌드 설정 확인")?;
     let build_files = ["pyproject.toml", "package.json", "Cargo.toml", "go.mod", "pom.xml", "build.gradle"];
     for name in &build_files {
         if read_count >= max_reads { break; }

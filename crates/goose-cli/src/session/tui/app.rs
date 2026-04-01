@@ -510,6 +510,19 @@ impl<'a> TuiApp<'a> {
         }
     }
 
+    /// 도구 단계명 + 진행률 동시 업데이트
+    pub fn update_tool_step(&mut self, step_name: &str, progress: f64) {
+        if let ToolStatus::Running {
+            name: ref mut n,
+            progress: ref mut p,
+            ..
+        } = self.tool_status
+        {
+            *n = step_name.to_string();
+            *p = Some(progress);
+        }
+    }
+
     /// 도구 완료
     pub fn finish_tool(&mut self) {
         if let ToolStatus::Running {
