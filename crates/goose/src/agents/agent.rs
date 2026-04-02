@@ -1093,6 +1093,33 @@ impl Agent {
         *self.tool_filter.lock().await = filter;
     }
 
+    /// Plan 모드 진입 — read-only 도구만 허용
+    pub async fn enter_plan_mode(&self) -> Option<Vec<String>> {
+        let previous = self.tool_filter.lock().await.clone();
+        // read-only 도구만 허용 (glob, grep, read, analyze, list_windows)
+        let read_only = vec![
+            "read".to_string(), "glob".to_string(), "grep".to_string(),
+            "analyze".to_string(), "list_windows".to_string(),
+            "ask_user_question".to_string(),
+        ];
+        *self.tool_filter.lock().await = Some(read_only);
+        self.add_system_context(
+            "plan_mode".to_string(),
+            "[PLAN MODE] 현재 Plan 모드입니다. 코드를 탐색하고 구현 계획을 세우세요.\n\
+             - 파일 읽기, 검색만 가능합니다. 수정/실행은 불가합니다.\n\
+             - 충분히 탐색한 후, 구현 계획을 구체적으로 작성해주세요.\n\
+             - 계획에는: 수정할 파일, 변경 내용, 순서, 주의사항을 포함하세요.\n\
+             - 사용자가 승인하면 Plan 모드를 종료하고 실행합니다.".to_string(),
+        ).await;
+        previous
+    }
+
+    /// Plan 모드 종료 — 이전 도구 필터 복원
+    pub async fn exit_plan_mode(&self, previous_filter: Option<Vec<String>>) {
+        *self.tool_filter.lock().await = previous_filter;
+        self.remove_system_context("plan_mode").await;
+    }
+
     pub async fn remove_extension(&self, name: &str, session_id: &str) -> Result<()> {
         self.extension_manager.remove_extension(name).await?;
 

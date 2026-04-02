@@ -569,6 +569,11 @@ impl<'a> TuiApp<'a> {
                 format!("🎨{}", self.theme_name.label()),
                 self.theme.info
             ),
+            if self.plan_mode {
+                Span::styled(" 📋Plan", ratatui::style::Style::default().fg(ratatui::style::Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD))
+            } else {
+                Span::raw("")
+            },
             Span::styled(" F1:? F2:🖱️ F3:📋 F4:🎨 F5:📝 F6:📊 F7:⚙️", self.theme.dimmed),
         ]);
 

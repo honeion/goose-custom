@@ -282,6 +282,9 @@ async fn run_tui_loop(
     // 컨텍스트 생명주기 추적
     let mut context_state = ContextState::new();
 
+    // Plan 모드 상태
+    let mut plan_mode_previous_filter: Option<Option<Vec<String>>> = None; // Some = Plan 모드 중
+
     // 세션 메모리 파일 로드 (.goose/sessions/memory.md)
     let memory_dir = std::path::Path::new(".goose/sessions");
     let memory_file = memory_dir.join("memory.md");
@@ -299,6 +302,40 @@ async fn run_tui_loop(
     } else {
         // 디렉토리 생성 (첫 세션)
         let _ = std::fs::create_dir_all(memory_dir);
+    }
+
+    // 프로젝트 문서 인덱싱 (docs/*.md)
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let docs_dir = cwd.join("docs");
+    let mut doc_index: Vec<(String, String)> = Vec::new(); // (파일명, 첫 3줄)
+    if docs_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&docs_dir) {
+            let mut doc_files: Vec<_> = entries.flatten()
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    e.path().is_file() && name.ends_with(".md")
+                })
+                .collect();
+            doc_files.sort_by_key(|e| e.file_name());
+            for entry in &doc_files {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Ok(fc) = std::fs::read_to_string(entry.path()) {
+                    let preview: String = fc.lines().take(3).collect::<Vec<_>>().join(" ");
+                    doc_index.push((name, preview));
+                }
+            }
+        }
+        if !doc_index.is_empty() {
+            let index_text: String = doc_index.iter()
+                .map(|(name, preview)| format!("- {}: {}", name, preview))
+                .collect::<Vec<_>>()
+                .join("\n");
+            session.agent.add_system_context(
+                "project_docs_index".to_string(),
+                format!("[PROJECT DOCS — docs/ 디렉토리 문서 인덱스 ({}개)]\n\n{}\n\n관련 질문이 있으면 해당 문서를 read 도구로 읽어서 참고하세요.", doc_index.len(), index_text),
+            ).await;
+            app.add_system_message(format!("📚 프로젝트 문서 {}개 인덱싱됨", doc_index.len()));
+        }
     }
 
     // 기존 메시지 히스토리 로드
@@ -357,6 +394,28 @@ async fn run_tui_loop(
 
                             // 슬래시 명령어 처리
                             if content.starts_with('/') {
+                                // /plan — Plan 모드 (agent 접근 필요)
+                                if content.trim() == "/plan" {
+                                    if let Some(msg) = app.messages.last() {
+                                        if msg.role == super::tui::MessageRole::User { app.messages.pop(); }
+                                    }
+                                    if plan_mode_previous_filter.is_some() {
+                                        // Plan 모드 종료
+                                        let prev = plan_mode_previous_filter.take().unwrap();
+                                        session.agent.exit_plan_mode(prev).await;
+                                        app.plan_mode = false;
+                                        app.add_system_message("📋 Plan 모드 종료 — 도구 제한 해제, 실행 모드로 복귀".to_string());
+                                    } else {
+                                        // Plan 모드 진입
+                                        let prev = session.agent.enter_plan_mode().await;
+                                        plan_mode_previous_filter = Some(prev);
+                                        app.plan_mode = true;
+                                        app.add_system_message("📋 Plan 모드 진입 — 읽기 전용 (read/glob/grep만 가능)\n탐색 후 계획을 세우세요. /plan으로 종료합니다.".to_string());
+                                    }
+                                    terminal.draw(|frame| app.render(frame))?;
+                                    continue;
+                                }
+
                                 handle_slash_command(&content, &mut app);
                                 terminal.draw(|frame| app.render(frame))?;
                                 // /quit, /exit 처리
@@ -753,7 +812,7 @@ fn handle_slash_command(cmd: &str, app: &mut TuiApp) {
             app.config_panel.open();
         }
         _ => {
-            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme) /hints /audit /config", cmd));
+            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme) /hints /audit /config /plan", cmd));
         }
     }
 }
