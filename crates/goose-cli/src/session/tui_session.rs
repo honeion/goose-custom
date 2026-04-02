@@ -282,6 +282,25 @@ async fn run_tui_loop(
     // 컨텍스트 생명주기 추적
     let mut context_state = ContextState::new();
 
+    // 세션 메모리 파일 로드 (.goose/sessions/memory.md)
+    let memory_dir = std::path::Path::new(".goose/sessions");
+    let memory_file = memory_dir.join("memory.md");
+    if memory_file.exists() {
+        if let Ok(memory_content) = std::fs::read_to_string(&memory_file) {
+            if !memory_content.trim().is_empty() {
+                let preview_lines: String = memory_content.lines().take(5).collect::<Vec<_>>().join(" | ");
+                session.agent.add_system_context(
+                    "session_memory".to_string(),
+                    format!("[SESSION MEMORY — 이전 작업 맥락]\n\n{}", memory_content),
+                ).await;
+                app.add_system_message(format!("📝 세션 메모리 로드됨: {}", preview_lines));
+            }
+        }
+    } else {
+        // 디렉토리 생성 (첫 세션)
+        let _ = std::fs::create_dir_all(memory_dir);
+    }
+
     // 기존 메시지 히스토리 로드
     for msg in &session.messages {
         match msg.role {
@@ -1660,9 +1679,9 @@ fn collect_modify_context(
 ) -> Result<(Vec<String>, usize)> {
     let mut context_parts: Vec<String> = Vec::new();
     let mut read_count = 0;
-    let max_reads = 8;
-    let max_lines = 80;
-    let total_steps = 5;
+    let max_reads = 12;
+    let max_lines = 150;
+    let total_steps = 6;
     let mut step = 0;
 
     // === Step 1: 프로젝트 트리 ===
@@ -1670,7 +1689,7 @@ fn collect_modify_context(
     tool_step(app, terminal, step, total_steps, "프로젝트 구조 스캔")?;
     collect_project_tree(base, &mut context_parts);
 
-    // === Step 2: 사용자가 지정한 파일 읽기 ===
+    // === Step 2: 사용자가 지정한 파일 읽기 (150줄) ===
     step += 1;
     tool_step(app, terminal, step, total_steps, "대상 파일 읽기")?;
     let mut target_file: Option<std::path::PathBuf> = None;
@@ -1687,28 +1706,67 @@ fn collect_modify_context(
         }
     }
 
-    // === Step 3: import 관계 파악 ===
+    // === Step 3: import 관계 파악 (2depth) ===
     step += 1;
-    tool_step(app, terminal, step, total_steps, "import 관계 탐색")?;
+    tool_step(app, terminal, step, total_steps, "import 관계 탐색 (2depth)")?;
     if let Some(ref tf) = target_file {
         if let Ok(fc) = std::fs::read_to_string(tf) {
-            let imports = extract_imports(&fc, tf);
-            for imp_path in imports {
+            let imports_depth1 = extract_imports(&fc, tf);
+            // depth 1
+            for imp_path in &imports_depth1 {
                 if read_count >= max_reads { break; }
-                let candidate = if imp_path.is_absolute() { imp_path.clone() } else { base.join(&imp_path) };
+                let candidate = if imp_path.is_absolute() { imp_path.clone() } else { base.join(imp_path) };
                 if candidate.is_file() {
                     if let Ok(imp_content) = std::fs::read_to_string(&candidate) {
                         let rel = candidate.strip_prefix(base).unwrap_or(&candidate);
-                        let truncated: String = imp_content.lines().take(40).collect::<Vec<_>>().join("\n");
-                        context_parts.push(format!("## {} (import 관계)\n```\n{}\n```", rel.display(), truncated));
+                        let truncated: String = imp_content.lines().take(60).collect::<Vec<_>>().join("\n");
+                        context_parts.push(format!("## {} (import depth-1)\n```\n{}\n```", rel.display(), truncated));
                         read_count += 1;
+                        // depth 2: 이 파일의 import도 추적
+                        let imports_depth2 = extract_imports(&imp_content, &candidate);
+                        for imp2 in imports_depth2.iter().take(2) {
+                            if read_count >= max_reads { break; }
+                            let c2 = if imp2.is_absolute() { imp2.clone() } else { base.join(imp2) };
+                            if c2.is_file() {
+                                if let Ok(c2_content) = std::fs::read_to_string(&c2) {
+                                    let r2 = c2.strip_prefix(base).unwrap_or(&c2);
+                                    let t2: String = c2_content.lines().take(30).collect::<Vec<_>>().join("\n");
+                                    context_parts.push(format!("## {} (import depth-2)\n```\n{}\n```", r2.display(), t2));
+                                    read_count += 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    // === Step 4: 테스트 파일 탐색 ===
+    // === Step 4: 같은 디렉토리 관련 파일 ===
+    step += 1;
+    tool_step(app, terminal, step, total_steps, "관련 파일 탐색")?;
+    if let Some(ref tf) = target_file {
+        if let Some(parent) = tf.parent() {
+            let stem = tf.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    if read_count >= max_reads { break; }
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    // 같은 접두사 또는 관련 패턴 (예: user.py ↔ user_service.py)
+                    if entry.path() != *tf && name.contains(stem) && entry.path().is_file() {
+                        if let Ok(fc) = std::fs::read_to_string(entry.path()) {
+                            let rel = entry.path().strip_prefix(base).unwrap_or(&entry.path()).to_path_buf();
+                            let truncated: String = fc.lines().take(40).collect::<Vec<_>>().join("\n");
+                            context_parts.push(format!("## {} (관련 파일)\n```\n{}\n```", rel.display(), truncated));
+                            read_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // === Step 5: 테스트 파일 탐색 ===
     step += 1;
     tool_step(app, terminal, step, total_steps, "테스트 파일 탐색")?;
     if let Some(ref tf) = target_file {
@@ -1716,7 +1774,7 @@ fn collect_modify_context(
             if read_count < max_reads {
                 if let Ok(fc) = std::fs::read_to_string(&test_file) {
                     let rel = test_file.strip_prefix(base).unwrap_or(&test_file);
-                    let truncated: String = fc.lines().take(40).collect::<Vec<_>>().join("\n");
+                    let truncated: String = fc.lines().take(60).collect::<Vec<_>>().join("\n");
                     context_parts.push(format!("## {} (테스트)\n```\n{}\n```", rel.display(), truncated));
                     read_count += 1;
                 }
@@ -1724,7 +1782,7 @@ fn collect_modify_context(
         }
     }
 
-    // === Step 5: Git diff ===
+    // === Step 6: Git diff ===
     step += 1;
     tool_step(app, terminal, step, total_steps, "Git 변경사항 확인")?;
     if let Some(ref tf) = target_file {
