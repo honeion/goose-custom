@@ -217,6 +217,55 @@ pub async fn check_if_compaction_needed(
     Ok(needs_compaction)
 }
 
+/// 오래된 도구 결과를 "[결과 생략]"으로 교체하여 토큰 절약
+///
+/// 최근 `keep_turns`턴 이내의 도구 결과는 보존하고,
+/// 그보다 오래된 도구 결과는 원본 크기 정보만 남기고 내용을 제거합니다.
+pub fn snip_old_tool_results(conversation: &mut Conversation, keep_turns: usize) {
+    use crate::conversation::message::ToolResponse as TR;
+
+    let messages = conversation.messages_mut();
+    let total = messages.len();
+    if total <= keep_turns * 2 {
+        return; // 대화가 짧으면 스킵
+    }
+
+    let cutoff = total.saturating_sub(keep_turns * 2);
+
+    for msg in messages[..cutoff].iter_mut() {
+        if !msg.is_agent_visible() { continue; }
+        let mut modified = false;
+        let new_content: Vec<MessageContent> = msg.content.iter().map(|c| {
+            if let MessageContent::ToolResponse(resp) = c {
+                if let Ok(result) = &resp.tool_result {
+                    // 도구 결과 텍스트 크기 계산
+                    let total_len: usize = result.content.iter()
+                        .filter_map(|item| item.as_text().map(|t| t.text.len()))
+                        .sum();
+                    if total_len > 500 {
+                        modified = true;
+                        let snipped_content = rmcp::model::Content::text(
+                            format!("[결과 생략 — 원본 {}자]", total_len)
+                        );
+                        return MessageContent::ToolResponse(TR {
+                            id: resp.id.clone(),
+                            tool_result: Ok(rmcp::model::CallToolResult {
+                                content: vec![snipped_content],
+                                ..result.clone()
+                            }),
+                            metadata: resp.metadata.clone(),
+                        });
+                    }
+                }
+            }
+            c.clone()
+        }).collect();
+        if modified {
+            msg.content = new_content;
+        }
+    }
+}
+
 fn filter_tool_responses(messages: &[Message], remove_percent: u32) -> Vec<&Message> {
     fn has_tool_response(msg: &Message) -> bool {
         msg.content

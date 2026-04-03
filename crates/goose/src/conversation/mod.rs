@@ -41,6 +41,10 @@ impl Conversation {
         &self.0
     }
 
+    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+        &mut self.0
+    }
+
     pub fn push(&mut self, message: Message) {
         if let Some(last) = self
             .0
