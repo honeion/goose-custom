@@ -647,6 +647,24 @@ async fn process_agent_message(
                             let summary = extract_tool_summary(&output);
                             app.push_tool_text(&format!("✓ {}", summary));
                             app.finish_tool();
+
+                            // 세션 메모리 자동 기록: write/edit 도구 성공 시
+                            if res.tool_result.is_ok() {
+                                // 도구 결과에서 파일 경로 패턴 감지
+                                if output.contains("Successfully wrote") || output.contains("successfully edited")
+                                    || output.contains("Created file") || output.contains("wrote to") {
+                                    let memory_path = std::path::Path::new(".goose/sessions/modified_files.md");
+                                    if let Some(parent) = memory_path.parent() {
+                                        let _ = std::fs::create_dir_all(parent);
+                                    }
+                                    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M");
+                                    let entry = format!("- [{}] {}\n", timestamp, summary.chars().take(200).collect::<String>());
+                                    let _ = std::fs::OpenOptions::new()
+                                        .create(true).append(true)
+                                        .open(memory_path)
+                                        .and_then(|mut f| std::io::Write::write_all(&mut f, entry.as_bytes()));
+                                }
+                            }
                         }
                         MessageContent::ActionRequired(action) => {
                             // 도구 승인 요청 처리 (TUI에서는 자동 승인)

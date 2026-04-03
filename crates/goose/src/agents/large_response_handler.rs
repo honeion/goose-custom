@@ -3,7 +3,7 @@ use rmcp::model::{CallToolResult, Content, ErrorData};
 use std::fs::File;
 use std::io::Write;
 
-const LARGE_TEXT_THRESHOLD: usize = 200_000;
+const LARGE_TEXT_THRESHOLD: usize = 100_000;
 
 /// Process tool response and handle large text content
 pub fn process_tool_response(

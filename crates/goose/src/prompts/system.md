@@ -213,6 +213,9 @@ browser_close()
   - `coder`: Code modifications (edit, write, refactor)
   - `bash`: Command execution (tests, builds, git)
   - `general`: Complex tasks spanning multiple domains
+  - `code-review`: Code review with security/performance/maintainability checklist
+  - `refactor`: Restructure code without changing behavior
+  - `test-writer`: Write unit/integration tests (pytest, jest, cargo test)
 
 ## Error Handling
 - If a command fails, explain the error clearly and specifically.
