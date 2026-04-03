@@ -1181,9 +1181,11 @@ async fn collect_context_with_progress(
         .and_then(|n| n.to_str())
         .unwrap_or("project");
 
-    // 진행 표시 — 도구 상태바 사용 (대화 흐름 안 끊김)
+    // 진행 표시 — 시스템 메시지 + 도구 상태바 병행
+    app.add_system_message(make_progress_bar(0, 7, &format!("{} {} 준비", short_name, intent.label())));
     app.start_tool(format!("{} {} 준비", short_name, intent.label()));
     terminal.draw(|frame| app.render(frame))?;
+    let progress_idx = app.messages.len() - 1;
 
     // Intent별 수집 디스패치
     let (context_parts, read_count) = match intent {
@@ -1195,8 +1197,7 @@ async fn collect_context_with_progress(
 
     // 프리-LLM 평가: 수집 파일이 너무 적으면 Analyze로 폴백 (1회)
     let (final_parts, final_count) = if read_count < 5 && intent != UserIntent::Analyze {
-        app.update_tool_step("수집 부족 — 프로젝트 분석으로 보충", 0.5);
-        terminal.draw(|frame| app.render(frame))?;
+        update_progress(app, terminal, progress_idx, &make_progress_bar(5, 7, "수집 부족 — 프로젝트 분석으로 보충"))?;
         let (mut extra_parts, extra_count) = collect_analyze_context(base, content, "unknown", app, terminal)?;
         let mut combined = context_parts;
         combined.append(&mut extra_parts);
@@ -1205,10 +1206,10 @@ async fn collect_context_with_progress(
         (context_parts, read_count)
     };
 
-    // 완료 표시 — 도구 상태바 종료 + 시스템 메시지로 결과 알림
+    // 완료 표시
     app.finish_tool();
-    app.add_system_message(format!("📂 {} {} — {}개 파일 수집 완료", intent.label(), short_name, final_count));
-    terminal.draw(|frame| app.render(frame))?;
+    update_progress(app, terminal, progress_idx,
+        &format!("◉ ━━━━━━━━━━━━━━━━━━━━ [100%] — {}개 파일 수집 완료, AI 분석 중...", final_count))?;
 
     if final_parts.is_empty() {
         return Ok(None);
@@ -1244,7 +1245,7 @@ fn update_progress(
     Ok(())
 }
 
-/// 도구 상태바에 단계 업데이트 + 리드로우
+/// 도구 상태바 + 시스템 메시지 동시 업데이트
 fn tool_step(
     app: &mut TuiApp<'_>,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -1254,6 +1255,18 @@ fn tool_step(
 ) -> Result<()> {
     let progress = step as f64 / total.max(1) as f64;
     app.update_tool_step(&format!("{}/{} {}", step, total, step_name), progress);
+    // 시스템 메시지도 업데이트 (마지막 시스템 메시지가 프로그레스 바이면)
+    let msg_count = app.messages.len();
+    if msg_count > 0 {
+        let last_idx = msg_count - 1;
+        if let Some(msg) = app.messages.get(last_idx) {
+            if msg.role == super::tui::MessageRole::System && msg.content.contains("━") {
+                // 프로그레스 바 시스템 메시지 업데이트
+                let bar_text = make_progress_bar(step, total, step_name);
+                app.messages[last_idx].content = bar_text;
+            }
+        }
+    }
     terminal.draw(|frame| app.render(frame))?;
     Ok(())
 }
