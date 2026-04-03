@@ -478,11 +478,37 @@ fn parse_table_cells(line: &str) -> Vec<String> {
 }
 
 /// 테이블 렌더링
+/// 문자열의 터미널 표시 너비 계산 (한글 등 와이드 문자 2칸)
+fn display_width(s: &str) -> usize {
+    s.chars().map(|c| {
+        if c.is_ascii() { 1 }
+        else if ('\u{1100}'..='\u{115F}').contains(&c)  // 한글 자모
+            || ('\u{2E80}'..='\u{A4CF}').contains(&c)    // CJK
+            || ('\u{AC00}'..='\u{D7AF}').contains(&c)    // 한글 음절
+            || ('\u{F900}'..='\u{FAFF}').contains(&c)    // CJK 호환
+            || ('\u{FE30}'..='\u{FE4F}').contains(&c)    // CJK 호환 형태
+            || ('\u{FF00}'..='\u{FF60}').contains(&c)    // 전각
+            || ('\u{FFE0}'..='\u{FFE6}').contains(&c)    // 전각 기호
+            || ('\u{20000}'..='\u{2FA1F}').contains(&c)  // CJK 확장
+        { 2 } else { 1 }
+    }).sum()
+}
+
+/// 문자열을 target_width 칸에 맞춰 스페이스 패딩
+fn pad_to_width(s: &str, target_width: usize) -> String {
+    let current = display_width(s);
+    if current >= target_width {
+        s.to_string()
+    } else {
+        format!("{}{}", s, " ".repeat(target_width - current))
+    }
+}
+
 pub fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'static>> {
     let mut result = Vec::new();
     if table_lines.is_empty() { return result; }
 
-    // 모든 셀 파싱 + 컬럼 너비 계산
+    // 모든 셀 파싱 + 컬럼 너비 계산 (표시 너비 기준)
     let mut all_rows: Vec<Vec<String>> = Vec::new();
     let mut col_widths: Vec<usize> = Vec::new();
     let mut header_idx: Option<usize> = None;
@@ -494,10 +520,11 @@ pub fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'stat
         }
         let cells = parse_table_cells(line);
         for (j, cell) in cells.iter().enumerate() {
+            let w = display_width(cell);
             if j >= col_widths.len() {
-                col_widths.push(cell.len());
-            } else if cell.len() > col_widths[j] {
-                col_widths[j] = cell.len();
+                col_widths.push(w);
+            } else if w > col_widths[j] {
+                col_widths[j] = w;
             }
         }
         all_rows.push(cells);
@@ -524,13 +551,14 @@ pub fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'stat
         let mut spans = vec![Span::styled("  │", border_style)];
         for (j, cell) in row.iter().enumerate() {
             let width = col_widths.get(j).copied().unwrap_or(3);
-            spans.push(Span::styled(format!(" {:width$} ", cell, width = width), style));
+            let padded = pad_to_width(cell, width);
+            spans.push(Span::styled(format!(" {} ", padded), style));
             spans.push(Span::styled("│", border_style));
         }
         // 누락된 셀 채우기
         for j in row.len()..col_widths.len() {
             let width = col_widths[j];
-            spans.push(Span::styled(format!(" {:width$} ", "", width = width), cell_style));
+            spans.push(Span::styled(format!(" {} ", " ".repeat(width)), cell_style));
             spans.push(Span::styled("│", border_style));
         }
         result.push(Line::from(spans));

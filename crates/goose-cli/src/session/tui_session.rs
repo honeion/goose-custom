@@ -326,13 +326,15 @@ async fn run_tui_loop(
             }
         }
         if !doc_index.is_empty() {
-            let index_text: String = doc_index.iter()
-                .map(|(name, preview)| format!("- {}: {}", name, preview))
+            // 파일명만 간략하게 (시스템 프롬프트 부담 최소화)
+            let names_only: String = doc_index.iter()
+                .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>()
-                .join("\n");
-            session.agent.add_system_context(
+                .join(", ");
+            session.agent.add_system_context_with_ttl(
                 "project_docs_index".to_string(),
-                format!("[PROJECT DOCS — docs/ 디렉토리 문서 인덱스 ({}개)]\n\n{}\n\n관련 질문이 있으면 해당 문서를 read 도구로 읽어서 참고하세요.", doc_index.len(), index_text),
+                format!("[PROJECT DOCS] docs/ 문서 {}개: {}. 관련 질문 시 read 도구로 해당 문서를 읽어 참고하세요.", doc_index.len(), names_only),
+                3, // 3턴 후 자동 제거
             ).await;
             app.add_system_message(format!("📚 프로젝트 문서 {}개 인덱싱됨", doc_index.len()));
         }
