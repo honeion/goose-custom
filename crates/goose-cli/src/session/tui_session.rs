@@ -2011,8 +2011,9 @@ fn collect_deploy_context(
 
 /// 스킵할 디렉토리 목록
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", "target", "__pycache__", ".git", "venv", ".venv",
-    "dist", "build", "scripts", "tests", "docs", "patches", "static", "data",
+    "node_modules", "target", "__pycache__", ".git", ".claude", ".goose",
+    "venv", ".venv", "dist", "build", "scripts", "tests", "docs",
+    "patches", "static", "data", ".github", ".vscode",
 ];
 
 /// 프로젝트 트리 (1 depth) 수집
