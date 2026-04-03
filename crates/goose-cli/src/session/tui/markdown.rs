@@ -494,11 +494,23 @@ fn display_width(s: &str) -> usize {
     }).sum()
 }
 
-/// 문자열을 target_width 칸에 맞춰 스페이스 패딩
+/// 문자열을 target_width 칸에 맞춰 패딩 또는 truncate
 fn pad_to_width(s: &str, target_width: usize) -> String {
     let current = display_width(s);
-    if current >= target_width {
-        s.to_string()
+    if current > target_width {
+        // 잘라내기 — 표시 너비 기준
+        let mut result = String::new();
+        let mut width = 0;
+        for c in s.chars() {
+            let cw = if c.is_ascii() { 1 } else if ('\u{AC00}'..='\u{D7AF}').contains(&c) || ('\u{2E80}'..='\u{A4CF}').contains(&c) { 2 } else { 1 };
+            if width + cw > target_width.saturating_sub(1) { break; }
+            result.push(c);
+            width += cw;
+        }
+        result.push('…');
+        let remaining = target_width.saturating_sub(width + 1);
+        result.push_str(&" ".repeat(remaining));
+        result
     } else {
         format!("{}{}", s, " ".repeat(target_width - current))
     }
@@ -530,9 +542,10 @@ pub fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'stat
         all_rows.push(cells);
     }
 
-    // 최소 너비
+    // 너비 제한: 최소 3, 최대 50
+    let max_col_width = 50;
     for w in col_widths.iter_mut() {
-        *w = (*w).max(3);
+        *w = (*w).clamp(3, max_col_width);
     }
 
     let header_style = styles.bold;
