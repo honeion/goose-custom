@@ -1203,8 +1203,9 @@ async fn collect_context_with_progress(
         (context_parts, read_count)
     };
 
-    // 완료 표시
+    // 완료 표시 — 도구 상태바 종료 + 시스템 메시지로 결과 알림
     app.finish_tool();
+    app.add_system_message(format!("📂 {} {} — {}개 파일 수집 완료", intent.label(), short_name, final_count));
     terminal.draw(|frame| app.render(frame))?;
 
     if final_parts.is_empty() {

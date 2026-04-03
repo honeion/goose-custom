@@ -458,7 +458,7 @@ fn tokenize_and_style(
 }
 
 /// 테이블 줄인지 감지 (| 로 시작하고 | 포함)
-fn is_table_line(line: &str) -> bool {
+pub fn is_table_line(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() > 2
 }
@@ -478,7 +478,7 @@ fn parse_table_cells(line: &str) -> Vec<String> {
 }
 
 /// 테이블 렌더링
-fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'static>> {
+pub fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'static>> {
     let mut result = Vec::new();
     if table_lines.is_empty() { return result; }
 

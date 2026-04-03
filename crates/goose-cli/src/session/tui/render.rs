@@ -14,7 +14,7 @@ use ratatui::{
 
 use super::{
     app::{ChatMessage, InputMode, MessageRole, ToolStatus, TuiApp},
-    markdown::{MdStyles, parse_line, is_code_block_delimiter, highlight_code_line},
+    markdown::{MdStyles, parse_line, is_code_block_delimiter, highlight_code_line, is_table_line, render_table},
     offscreen_buffer::PanelId,
     theme::{colors, icons},
 };
@@ -357,19 +357,29 @@ impl<'a> TuiApp<'a> {
             ..MdStyles::default()
         };
 
-        // 메시지 내용 (마크다운 + 코드 블록 구문 강조)
+        // 메시지 내용 (마크다운 + 코드 블록 + 테이블 구문 강조)
         let content_width = (width as usize).saturating_sub(6);
         let mut in_code_block = false;
         let mut code_lang = String::new();
+        let mut table_buffer: Vec<String> = Vec::new();
 
-        for line in msg.content.lines() {
+        let all_lines: Vec<&str> = msg.content.lines().collect();
+        for line in &all_lines {
             // 코드 블록 구분자 체크
             if let Some(lang) = is_code_block_delimiter(line) {
+                // 테이블 버퍼 비우기
+                if !table_buffer.is_empty() {
+                    let table_lines = render_table(&table_buffer, &md_styles);
+                    for tl in table_lines {
+                        let mut padded = vec![Span::raw("   ")];
+                        padded.extend(tl.spans);
+                        lines.push(Line::from(padded));
+                    }
+                    table_buffer.clear();
+                }
                 if in_code_block {
-                    // 코드 블록 종료
                     in_code_block = false;
                 } else {
-                    // 코드 블록 시작
                     in_code_block = true;
                     code_lang = lang;
                     if !code_lang.is_empty() {
@@ -391,7 +401,6 @@ impl<'a> TuiApp<'a> {
                     Span::raw("   "),
                     Span::styled("  ", md_styles.code_block),
                 ];
-                // 구문 강조 span에도 코드블록 배경색 적용
                 let highlighted = highlight_code_line(line, &code_lang);
                 for span in highlighted {
                     let mut style = span.style;
@@ -399,7 +408,20 @@ impl<'a> TuiApp<'a> {
                     code_spans.push(Span::styled(span.content.to_string(), style));
                 }
                 lines.push(Line::from(code_spans));
+            } else if is_table_line(line) {
+                // 테이블 줄 버퍼에 축적
+                table_buffer.push(line.to_string());
             } else {
+                // 테이블 버퍼가 있으면 먼저 렌더링
+                if !table_buffer.is_empty() {
+                    let table_lines = render_table(&table_buffer, &md_styles);
+                    for tl in table_lines {
+                        let mut padded = vec![Span::raw("   ")];
+                        padded.extend(tl.spans);
+                        lines.push(Line::from(padded));
+                    }
+                    table_buffer.clear();
+                }
                 // 일반 텍스트: 마크다운 렌더링
                 let wrapped = textwrap_simple(line, content_width);
                 for wrapped_line in wrapped {
@@ -408,6 +430,15 @@ impl<'a> TuiApp<'a> {
                     line_spans.extend(md_spans);
                     lines.push(Line::from(line_spans));
                 }
+            }
+        }
+        // 남은 테이블 버퍼 처리
+        if !table_buffer.is_empty() {
+            let table_lines = render_table(&table_buffer, &md_styles);
+            for tl in table_lines {
+                let mut padded = vec![Span::raw("   ")];
+                padded.extend(tl.spans);
+                lines.push(Line::from(padded));
             }
         }
 
