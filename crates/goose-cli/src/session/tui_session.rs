@@ -477,7 +477,7 @@ async fn run_tui_loop(
                                     &content, intent, &mut app, terminal,
                                 ).await? {
                                     let context_key = format!("project_{}_context", intent.context_key());
-                                    session.agent.add_system_context(context_key.clone(), context).await;
+                                    session.agent.add_system_context_with_ttl(context_key.clone(), context, 8).await;
                                     context_state.last_intent = Some(intent);
                                     context_state.last_path = Some(current_path);
                                     context_state.last_context_key = Some(context_key);
@@ -491,6 +491,9 @@ async fn run_tui_loop(
                                 &mut app,
                                 terminal,
                             ).await?;
+
+                            // 5. 컨텍스트 TTL 감소
+                            session.agent.tick_context_ttls().await;
                         }
                     }
                     _ => {}

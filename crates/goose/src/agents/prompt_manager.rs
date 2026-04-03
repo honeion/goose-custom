@@ -22,6 +22,8 @@ const MAX_TOOLS: usize = 50;
 pub struct PromptManager {
     system_prompt_override: Option<String>,
     system_prompt_extras: IndexMap<String, String>,
+    /// TTL 카운터: key → 남은 메시지 수. 0이 되면 자동 제거.
+    system_prompt_ttls: std::collections::HashMap<String, usize>,
     current_date_timestamp: String,
 }
 
@@ -226,8 +228,7 @@ impl PromptManager {
         PromptManager {
             system_prompt_override: None,
             system_prompt_extras: IndexMap::new(),
-            // Use the fixed current date time so that prompt cache can be used.
-            // Filtering to an hour to balance user time accuracy and multi session prompt cache hits.
+            system_prompt_ttls: std::collections::HashMap::new(),
             current_date_timestamp: Utc::now().format("%Y-%m-%d %H:00").to_string(),
         }
     }
@@ -237,6 +238,7 @@ impl PromptManager {
         PromptManager {
             system_prompt_override: None,
             system_prompt_extras: IndexMap::new(),
+            system_prompt_ttls: std::collections::HashMap::new(),
             current_date_timestamp: dt.format("%Y-%m-%d %H:%M:%S").to_string(),
         }
     }
@@ -245,6 +247,30 @@ impl PromptManager {
     /// Using the same key will replace the previous instruction
     pub fn add_system_prompt_extra(&mut self, key: String, instruction: String) {
         self.system_prompt_extras.insert(key, instruction);
+    }
+
+    /// Add an instruction with TTL (auto-expires after N messages)
+    pub fn add_system_prompt_extra_with_ttl(&mut self, key: String, instruction: String, ttl: usize) {
+        self.system_prompt_extras.insert(key.clone(), instruction);
+        self.system_prompt_ttls.insert(key, ttl);
+    }
+
+    /// TTL 감소 — 매 reply 시 호출. 0이 되면 자동 제거.
+    pub fn tick_ttls(&mut self) {
+        let expired: Vec<String> = self.system_prompt_ttls.iter_mut()
+            .filter_map(|(key, ttl)| {
+                if *ttl == 0 {
+                    Some(key.clone())
+                } else {
+                    *ttl -= 1;
+                    None
+                }
+            })
+            .collect();
+        for key in expired {
+            self.system_prompt_extras.shift_remove(&key);
+            self.system_prompt_ttls.remove(&key);
+        }
     }
 
     /// Remove an additional instruction from the system prompt by key

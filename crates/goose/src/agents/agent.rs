@@ -355,6 +355,18 @@ impl Agent {
         pm.add_system_prompt_extra(key, context);
     }
 
+    /// 시스템 프롬프트에 TTL 컨텍스트 주입 (N 메시지 후 자동 제거)
+    pub async fn add_system_context_with_ttl(&self, key: String, context: String, ttl: usize) {
+        let mut pm = self.prompt_manager.lock().await;
+        pm.add_system_prompt_extra_with_ttl(key, context, ttl);
+    }
+
+    /// 컨텍스트 TTL 감소 (매 reply 시 호출)
+    pub async fn tick_context_ttls(&self) {
+        let mut pm = self.prompt_manager.lock().await;
+        pm.tick_ttls();
+    }
+
     /// 시스템 프롬프트에서 컨텍스트 제거
     pub async fn remove_system_context(&self, key: &str) -> Option<String> {
         let mut pm = self.prompt_manager.lock().await;
