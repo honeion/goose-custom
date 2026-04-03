@@ -44,6 +44,7 @@ enum UserIntent {
     Debug,    // 에러/디버그
     Modify,   // 코드 수정
     Deploy,   // 배포/빌드
+    Data,     // 데이터 분석/처리
 }
 
 impl UserIntent {
@@ -54,6 +55,7 @@ impl UserIntent {
             UserIntent::Debug => "debug",
             UserIntent::Modify => "modify",
             UserIntent::Deploy => "deploy",
+            UserIntent::Data => "data",
         }
     }
 
@@ -64,6 +66,7 @@ impl UserIntent {
             UserIntent::Debug => "디버그 컨텍스트",
             UserIntent::Modify => "수정 대상 분석",
             UserIntent::Deploy => "배포 환경 분석",
+            UserIntent::Data => "데이터 분석",
         }
     }
 
@@ -74,6 +77,7 @@ impl UserIntent {
             UserIntent::Debug => "위에 수집된 실제 컨텍스트만을 기반으로 문제의 원인을 분석해주세요. 존재하지 않는 코드나 에러를 지어내지 마세요. 각 파일을 인용할 때 [파일 N] 번호를 사용해주세요. 코드상으로 원인을 특정하기 어려우면, 수집된 환경 설정(docker-compose, k8s manifest 등)을 참고하여 kubectl logs 등 런타임 로그 확인을 시도해주세요.",
             UserIntent::Modify => "위에 수집된 실제 파일 내용만을 기반으로 분석해주세요. 수집되지 않은 코드를 추측하지 마세요. 각 파일을 인용할 때 [파일 N] 번호를 사용해주세요. 파일의 구조와 import 관계를 파악하고, 수정 방안을 제시해주세요.",
             UserIntent::Deploy => "위에 수집된 실제 인프라 설정 파일만을 기반으로 분석해주세요. 수집되지 않은 설정 파일의 내용을 지어내지 마세요. 각 파일을 인용할 때 [파일 N] 번호를 사용해주세요. Dockerfile, CI/CD, k8s manifest를 기반으로 현재 배포 파이프라인을 설명해주세요.",
+            UserIntent::Data => "위에 수집된 데이터 파일의 스키마와 샘플을 기반으로 분석해주세요. 데이터 구조, 컬럼 의미, 활용 가능한 분석 방향을 한국어로 설명해주세요. 관련 스크립트가 있으면 함께 참고하세요.",
         }
     }
 }
@@ -100,8 +104,15 @@ fn detect_intent(content: &str) -> Option<UserIntent> {
         "설명해", "구조", "아키텍처", "architecture",
     ];
 
+    let data_keywords = [
+        "데이터", "csv", "엑셀", "excel", "xlsx", "json",
+        "통계", "차트", "리포트", "report", "대시보드", "dashboard",
+    ];
+
     if debug_keywords.iter().any(|kw| lower.contains(kw)) {
         Some(UserIntent::Debug)
+    } else if data_keywords.iter().any(|kw| lower.contains(kw)) {
+        Some(UserIntent::Data)
     } else if modify_keywords.iter().any(|kw| lower.contains(kw)) {
         Some(UserIntent::Modify)
     } else if deploy_keywords.iter().any(|kw| lower.contains(kw)) {
@@ -1165,6 +1176,7 @@ async fn collect_context_with_progress(
         UserIntent::Debug => collect_debug_context(base, content, app, terminal)?,
         UserIntent::Modify => collect_modify_context(base, content, app, terminal)?,
         UserIntent::Deploy => collect_deploy_context(base, content, app, terminal)?,
+        UserIntent::Data => collect_data_context(base, content, app, terminal)?,
     };
 
     // 프리-LLM 평가: 수집 파일이 너무 적으면 Analyze로 폴백 (1회)
@@ -1980,6 +1992,122 @@ fn collect_deploy_context(
 // ============================================================
 // 공통 헬퍼 (수집 함수에서 공유)
 // ============================================================
+
+/// Data intent: 데이터 파일 감지 + 스키마/샘플 수집
+fn collect_data_context(
+    base: &std::path::Path,
+    _content: &str,
+    app: &mut TuiApp<'_>,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> Result<(Vec<String>, usize)> {
+    let mut context_parts: Vec<String> = Vec::new();
+    let mut read_count = 0;
+    let max_reads = 10;
+    let total_steps = 4;
+    let mut step = 0;
+
+    // === Step 1: 프로젝트 트리 ===
+    step += 1;
+    tool_step(app, terminal, step, total_steps, "프로젝트 구조 스캔")?;
+    collect_project_tree(base, &mut context_parts);
+
+    // === Step 2: 데이터 파일 탐색 (CSV, JSON, XLSX, TSV) ===
+    step += 1;
+    tool_step(app, terminal, step, total_steps, "데이터 파일 탐색")?;
+    let data_exts = ["csv", "json", "xlsx", "xls", "tsv", "parquet"];
+    let mut data_files: Vec<std::path::PathBuf> = Vec::new();
+    // 루트 + 1depth 탐색
+    fn scan_data_files(dir: &std::path::Path, exts: &[&str], results: &mut Vec<std::path::PathBuf>, depth: usize) {
+        if depth > 2 { return; }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                if entry.path().is_file() {
+                    if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                        if exts.contains(&ext) {
+                            results.push(entry.path());
+                        }
+                    }
+                } else if entry.path().is_dir() && depth < 2 {
+                    let skip = ["node_modules", "target", "__pycache__", ".git", "venv", ".venv"];
+                    if !skip.contains(&name.as_str()) {
+                        scan_data_files(&entry.path(), exts, results, depth + 1);
+                    }
+                }
+            }
+        }
+    }
+    scan_data_files(base, &data_exts, &mut data_files, 0);
+    data_files.sort();
+
+    // 파일 목록 + 크기
+    if !data_files.is_empty() {
+        let file_list: Vec<String> = data_files.iter().map(|p| {
+            let rel = p.strip_prefix(base).unwrap_or(p);
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let size_str = if size > 1_000_000 { format!("{:.1}MB", size as f64 / 1_000_000.0) }
+                else if size > 1_000 { format!("{:.1}KB", size as f64 / 1_000.0) }
+                else { format!("{}B", size) };
+            format!("- {} ({})", rel.display(), size_str)
+        }).collect();
+        context_parts.push(format!("## 데이터 파일 목록 ({}개)\n{}", data_files.len(), file_list.join("\n")));
+    }
+
+    // === Step 3: CSV/TSV 헤더 + 첫 5행, JSON 구조 ===
+    step += 1;
+    tool_step(app, terminal, step, total_steps, "스키마/샘플 읽기")?;
+    for file in &data_files {
+        if read_count >= max_reads { break; }
+        let rel = file.strip_prefix(base).unwrap_or(file);
+        let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        match ext {
+            "csv" | "tsv" => {
+                if let Ok(fc) = std::fs::read_to_string(file) {
+                    let sample: String = fc.lines().take(6).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (헤더+샘플)\n```\n{}\n```", rel.display(), sample));
+                    read_count += 1;
+                }
+            }
+            "json" => {
+                if let Ok(fc) = std::fs::read_to_string(file) {
+                    // JSON 첫 30줄 (구조 파악)
+                    let sample: String = fc.lines().take(30).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (JSON 구조)\n```json\n{}\n```", rel.display(), sample));
+                    read_count += 1;
+                }
+            }
+            "xlsx" | "xls" => {
+                // 바이너리라 내용 못 읽음 — 파일 존재만 기록
+                context_parts.push(format!("## {} (Excel — read 도구로 내용 확인 필요)", rel.display()));
+            }
+            _ => {}
+        }
+    }
+
+    // === Step 4: 관련 스크립트 탐색 ===
+    step += 1;
+    tool_step(app, terminal, step, total_steps, "분석 스크립트 탐색")?;
+    let script_patterns = ["analyze", "analysis", "report", "chart", "plot", "etl", "transform", "pipeline"];
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for entry in entries.flatten() {
+            if read_count >= max_reads { break; }
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            let is_script = name.ends_with(".py") || name.ends_with(".r") || name.ends_with(".ipynb");
+            if is_script && script_patterns.iter().any(|p| name.contains(p)) {
+                if let Ok(fc) = std::fs::read_to_string(entry.path()) {
+                    let rel = entry.path().strip_prefix(base).unwrap_or(&entry.path()).to_path_buf();
+                    let truncated: String = fc.lines().take(40).collect::<Vec<_>>().join("\n");
+                    context_parts.push(format!("## {} (분석 스크립트)\n```\n{}\n```", rel.display(), truncated));
+                    read_count += 1;
+                }
+            }
+        }
+    }
+    collect_git_status(base, &mut context_parts);
+
+    Ok((context_parts, read_count))
+}
 
 /// 스킵할 디렉토리 목록
 const SKIP_DIRS: &[&str] = &[
