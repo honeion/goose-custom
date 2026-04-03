@@ -1117,11 +1117,12 @@ impl Agent {
         *self.tool_filter.lock().await = Some(read_only);
         self.add_system_context(
             "plan_mode".to_string(),
-            "[PLAN MODE] 현재 Plan 모드입니다. 코드를 탐색하고 구현 계획을 세우세요.\n\
-             - 파일 읽기, 검색만 가능합니다. 수정/실행은 불가합니다.\n\
-             - 충분히 탐색한 후, 구현 계획을 구체적으로 작성해주세요.\n\
-             - 계획에는: 수정할 파일, 변경 내용, 순서, 주의사항을 포함하세요.\n\
-             - 사용자가 승인하면 Plan 모드를 종료하고 실행합니다.".to_string(),
+            "⚠️ [PLAN MODE — READ ONLY] ⚠️\n\
+             현재 Plan 모드입니다. 다음 규칙을 반드시 따르세요:\n\n\
+             ❌ 절대 금지: write, edit, shell, text_editor, undo, notebook_edit 도구를 호출하지 마세요. 이 도구들은 비활성화되어 있어 호출해도 실패합니다.\n\
+             ✅ 허용: read, glob, grep, analyze만 사용하세요.\n\n\
+             사용자가 파일 수정을 요청하면: \"현재 Plan 모드라 수정할 수 없습니다. /plan으로 종료 후 실행해주세요.\"라고 답하세요.\n\n\
+             할 일: 코드를 탐색하고 구현 계획을 작성하세요. 계획에는 수정할 파일, 변경 내용, 순서, 주의사항을 포함하세요.".to_string(),
         ).await;
         previous
     }
