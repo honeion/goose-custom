@@ -14,7 +14,7 @@ use ratatui::{
 
 use super::{
     app::{ChatMessage, InputMode, MessageRole, ToolStatus, TuiApp},
-    markdown::{MdStyles, parse_line, is_code_block_delimiter, highlight_code_line, is_table_line, render_table},
+    markdown::{MdStyles, parse_line, is_code_block_delimiter, highlight_code_line, is_table_line, render_table_with_width},
     offscreen_buffer::PanelId,
     theme::{colors, icons},
 };
@@ -369,7 +369,7 @@ impl<'a> TuiApp<'a> {
             if let Some(lang) = is_code_block_delimiter(line) {
                 // 테이블 버퍼 비우기
                 if !table_buffer.is_empty() {
-                    let table_lines = render_table(&table_buffer, &md_styles);
+                    let table_lines = render_table_with_width(&table_buffer, &md_styles, content_width);
                     for tl in table_lines {
                         let mut padded = vec![Span::raw("   ")];
                         padded.extend(tl.spans);
@@ -414,7 +414,7 @@ impl<'a> TuiApp<'a> {
             } else {
                 // 테이블 버퍼가 있으면 먼저 렌더링
                 if !table_buffer.is_empty() {
-                    let table_lines = render_table(&table_buffer, &md_styles);
+                    let table_lines = render_table_with_width(&table_buffer, &md_styles, content_width);
                     for tl in table_lines {
                         let mut padded = vec![Span::raw("   ")];
                         padded.extend(tl.spans);
@@ -434,7 +434,7 @@ impl<'a> TuiApp<'a> {
         }
         // 남은 테이블 버퍼 처리
         if !table_buffer.is_empty() {
-            let table_lines = render_table(&table_buffer, &md_styles);
+            let table_lines = render_table_with_width(&table_buffer, &md_styles, content_width);
             for tl in table_lines {
                 let mut padded = vec![Span::raw("   ")];
                 padded.extend(tl.spans);

@@ -517,6 +517,11 @@ fn pad_to_width(s: &str, target_width: usize) -> String {
 }
 
 pub fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'static>> {
+    render_table_with_width(table_lines, styles, 120) // 기본 120칸
+}
+
+/// 터미널 너비를 고려한 테이블 렌더링
+pub fn render_table_with_width(table_lines: &[String], styles: &MdStyles, available_width: usize) -> Vec<Line<'static>> {
     let mut result = Vec::new();
     if table_lines.is_empty() { return result; }
 
@@ -542,10 +547,15 @@ pub fn render_table(table_lines: &[String], styles: &MdStyles) -> Vec<Line<'stat
         all_rows.push(cells);
     }
 
-    // 너비 제한: 최소 3, 최대 50
-    let max_col_width = 50;
+    // 너비 제한: 터미널 너비에 맞춤
+    // 테이블 오버헤드: "  │" + 각 컬럼 " content │" = 2 + cols*(width+3) + 1
+    let num_cols = col_widths.len().max(1);
+    let overhead = 3 + num_cols * 3; // 앞여백 + 각 컬럼의 " " + "│"
+    let max_total_content = available_width.saturating_sub(overhead);
+    let max_per_col = if num_cols > 0 { max_total_content / num_cols } else { 30 };
+
     for w in col_widths.iter_mut() {
-        *w = (*w).clamp(3, max_col_width);
+        *w = (*w).clamp(3, max_per_col.max(5));
     }
 
     let header_style = styles.bold;
