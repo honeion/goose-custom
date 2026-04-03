@@ -285,58 +285,30 @@ async fn run_tui_loop(
     // Plan 모드 상태
     let mut plan_mode_previous_filter: Option<Option<Vec<String>>> = None; // Some = Plan 모드 중
 
-    // 세션 메모리 파일 로드 (.goose/sessions/memory.md)
+    // 세션 메모리 파일 확인 (알림만, 시스템 컨텍스트 주입 안 함)
     let memory_dir = std::path::Path::new(".goose/sessions");
     let memory_file = memory_dir.join("memory.md");
     if memory_file.exists() {
         if let Ok(memory_content) = std::fs::read_to_string(&memory_file) {
             if !memory_content.trim().is_empty() {
-                let preview_lines: String = memory_content.lines().take(5).collect::<Vec<_>>().join(" | ");
-                session.agent.add_system_context(
-                    "session_memory".to_string(),
-                    format!("[SESSION MEMORY — 이전 작업 맥락]\n\n{}", memory_content),
-                ).await;
-                app.add_system_message(format!("📝 세션 메모리 로드됨: {}", preview_lines));
+                app.add_system_message("📝 세션 메모리 존재: .goose/sessions/memory.md (필요 시 read로 확인)".to_string());
             }
         }
     } else {
-        // 디렉토리 생성 (첫 세션)
         let _ = std::fs::create_dir_all(memory_dir);
     }
 
-    // 프로젝트 문서 인덱싱 (docs/*.md)
+    // 프로젝트 문서 확인 (알림만, 시스템 컨텍스트 주입 안 함)
     let cwd = std::env::current_dir().unwrap_or_default();
     let docs_dir = cwd.join("docs");
-    let mut doc_index: Vec<(String, String)> = Vec::new(); // (파일명, 첫 3줄)
     if docs_dir.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&docs_dir) {
-            let mut doc_files: Vec<_> = entries.flatten()
-                .filter(|e| {
-                    let name = e.file_name().to_string_lossy().to_string();
-                    e.path().is_file() && name.ends_with(".md")
-                })
-                .collect();
-            doc_files.sort_by_key(|e| e.file_name());
-            for entry in &doc_files {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if let Ok(fc) = std::fs::read_to_string(entry.path()) {
-                    let preview: String = fc.lines().take(3).collect::<Vec<_>>().join(" ");
-                    doc_index.push((name, preview));
-                }
+            let doc_count = entries.flatten()
+                .filter(|e| e.path().is_file() && e.file_name().to_string_lossy().ends_with(".md"))
+                .count();
+            if doc_count > 0 {
+                app.add_system_message(format!("📚 프로젝트 문서 {}개 확인됨 (docs/)", doc_count));
             }
-        }
-        if !doc_index.is_empty() {
-            // 파일명만 간략하게 (시스템 프롬프트 부담 최소화)
-            let names_only: String = doc_index.iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            session.agent.add_system_context_with_ttl(
-                "project_docs_index".to_string(),
-                format!("[PROJECT DOCS] docs/ 문서 {}개: {}. 관련 질문 시 read 도구로 해당 문서를 읽어 참고하세요.", doc_index.len(), names_only),
-                3, // 3턴 후 자동 제거
-            ).await;
-            app.add_system_message(format!("📚 프로젝트 문서 {}개 인덱싱됨", doc_index.len()));
         }
     }
 
