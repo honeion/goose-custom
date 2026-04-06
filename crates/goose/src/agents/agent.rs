@@ -1133,10 +1133,13 @@ impl Agent {
         self.remove_system_context("plan_mode").await;
     }
 
-    /// Safe 모드 진입 — shell/bash만 차단, write/edit는 허용
-    pub async fn enter_safe_mode(&self, session_id: &str) -> Option<Vec<String>> {
-        let previous = self.tool_filter.lock().await.clone();
-        // 현재 사용 가능한 도구 목록에서 shell/bash만 제외
+    /// Safe 모드 진입 — shell 차단 + write/edit 승인 요청 (Approve 모드로 전환)
+    /// 반환: (이전 tool_filter, 이전 goose_mode)
+    pub async fn enter_safe_mode(&self, session_id: &str) -> (Option<Vec<String>>, GooseMode) {
+        let previous_filter = self.tool_filter.lock().await.clone();
+        let previous_mode = self.config.goose_mode;
+
+        // shell/bash 차단
         let all_tools = self.list_tools(session_id, None).await;
         let safe_filter: Vec<String> = all_tools.iter()
             .map(|t| t.name.to_string())
@@ -1146,15 +1149,16 @@ impl Agent {
             })
             .collect();
         *self.tool_filter.lock().await = Some(safe_filter);
+
         self.add_system_context(
             "safe_mode".to_string(),
-            "[SAFE MODE] shell/bash 도구가 비활성화되어 있습니다. 파일 수정(write/edit)은 가능하지만, 명령 실행이 필요하면 사용자에게 /safe 해제를 요청하세요.".to_string(),
+            "[SAFE MODE] shell/bash가 차단되었습니다. write/edit 실행 시 사용자 승인이 필요합니다.".to_string(),
         ).await;
-        previous
+        (previous_filter, previous_mode)
     }
 
     /// Safe 모드 종료
-    pub async fn exit_safe_mode(&self, previous_filter: Option<Vec<String>>) {
+    pub async fn exit_safe_mode(&self, previous_filter: Option<Vec<String>>, _previous_mode: GooseMode) {
         *self.tool_filter.lock().await = previous_filter;
         self.remove_system_context("safe_mode").await;
     }

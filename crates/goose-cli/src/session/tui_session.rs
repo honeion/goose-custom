@@ -295,8 +295,8 @@ async fn run_tui_loop(
 
     // Plan 모드 상태
     let mut plan_mode_previous_filter: Option<Option<Vec<String>>> = None; // Some = Plan 모드 중
-    // Safe 모드 상태 (shell 차단)
-    let mut safe_mode_previous_filter: Option<Option<Vec<String>>> = None; // Some = Safe 모드 중
+    // Safe 모드 상태 (shell 차단 + write/edit 승인)
+    let mut safe_mode_state: Option<(Option<Vec<String>>, goose::config::GooseMode)> = None;
 
     // 세션 메모리 파일 확인 (알림만, 시스템 컨텍스트 주입 안 함)
     let memory_dir = std::path::Path::new(".goose/sessions");
@@ -403,21 +403,24 @@ async fn run_tui_loop(
                                     continue;
                                 }
 
-                                // /safe — Safe 모드 (shell/bash 차단)
+                                // /safe — Safe 모드 (shell 차단 + write/edit 승인 요청)
                                 if content.trim() == "/safe" {
                                     if let Some(msg) = app.messages.last() {
                                         if msg.role == super::tui::MessageRole::User { app.messages.pop(); }
                                     }
-                                    if safe_mode_previous_filter.is_some() {
-                                        let prev = safe_mode_previous_filter.take().unwrap();
-                                        session.agent.exit_safe_mode(prev).await;
+                                    if let Some((prev_filter, prev_mode)) = safe_mode_state.take() {
+                                        session.agent.exit_safe_mode(prev_filter, prev_mode).await;
+                                        // GooseMode 복원
+                                        session.agent.config.goose_mode = prev_mode;
                                         app.safe_mode = false;
-                                        app.add_system_message("🛡️ Safe 모드 종료 — shell 제한 해제".to_string());
+                                        app.add_system_message("🛡️ Safe 모드 종료 — shell 해제, 자동 승인 복원".to_string());
                                     } else {
-                                        let prev = session.agent.enter_safe_mode(&session.session_id).await;
-                                        safe_mode_previous_filter = Some(prev);
+                                        let (prev_filter, prev_mode) = session.agent.enter_safe_mode(&session.session_id).await;
+                                        // GooseMode를 Approve로 전환 → write/edit에 ActionRequired 발생
+                                        session.agent.config.goose_mode = goose::config::GooseMode::Approve;
+                                        safe_mode_state = Some((prev_filter, prev_mode));
                                         app.safe_mode = true;
-                                        app.add_system_message("🛡️ Safe 모드 활성화 — shell/bash 차단됨\n파일 수정(write/edit)은 가능. 명령 실행 필요 시 /safe 해제.".to_string());
+                                        app.add_system_message("🛡️ Safe 모드 활성화\n  ├─ shell/bash: 차단\n  └─ write/edit: 실행 전 승인 요청 (Y/N)".to_string());
                                     }
                                     terminal.draw(|frame| app.render(frame))?;
                                     continue;
@@ -834,14 +837,61 @@ async fn process_agent_message(
                         }
                         MessageContent::ActionRequired(action) => {
                             if let ActionRequiredData::ToolConfirmation { id, tool_name, .. } = &action.data {
-                                app.push_tool_text(&format!("🔓 {} 승인됨", tool_name));
-                                session.agent.handle_confirmation(
-                                    id.clone(),
-                                    PermissionConfirmation {
-                                        principal_type: PrincipalType::Tool,
-                                        permission: Permission::AllowOnce,
-                                    },
-                                ).await;
+                                if app.safe_mode {
+                                    // Safe 모드: Y/N 확인
+                                    let short = tool_name.split("__").last().unwrap_or(tool_name);
+                                    if let Some(last_msg) = app.messages.last_mut() {
+                                        if last_msg.is_streaming {
+                                            last_msg.content.push_str(&format!("\n  ⚠️ `{}` 실행? (Y/N)\n", short));
+                                        }
+                                    }
+                                    app.push_tool_text(&format!("⚠️ {} — Y/N 대기", tool_name));
+                                    terminal.draw(|frame| app.render(frame))?;
+
+                                    let approved = loop {
+                                        if event::poll(Duration::from_millis(100))? {
+                                            if let crossterm::event::Event::Key(key) = event::read()? {
+                                                match key.code {
+                                                    crossterm::event::KeyCode::Char('y') | crossterm::event::KeyCode::Char('Y')
+                                                    | crossterm::event::KeyCode::Enter => break true,
+                                                    crossterm::event::KeyCode::Char('n') | crossterm::event::KeyCode::Char('N')
+                                                    | crossterm::event::KeyCode::Esc => break false,
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                        app.update(Action::Tick);
+                                        terminal.draw(|frame| app.render(frame))?;
+                                    };
+
+                                    let permission = if approved {
+                                        app.push_tool_text(&format!("✅ {} 승인", tool_name));
+                                        if let Some(last_msg) = app.messages.last_mut() {
+                                            if last_msg.is_streaming { last_msg.content.push_str("  ✅ 승인\n"); }
+                                        }
+                                        Permission::AllowOnce
+                                    } else {
+                                        app.push_tool_text(&format!("❌ {} 거부", tool_name));
+                                        if let Some(last_msg) = app.messages.last_mut() {
+                                            if last_msg.is_streaming { last_msg.content.push_str("  ❌ 거부\n"); }
+                                        }
+                                        Permission::DenyOnce
+                                    };
+                                    session.agent.handle_confirmation(
+                                        id.clone(),
+                                        PermissionConfirmation { principal_type: PrincipalType::Tool, permission },
+                                    ).await;
+                                } else {
+                                    // 일반: 자동 승인
+                                    app.push_tool_text(&format!("🔓 {} 승인", tool_name));
+                                    session.agent.handle_confirmation(
+                                        id.clone(),
+                                        PermissionConfirmation {
+                                            principal_type: PrincipalType::Tool,
+                                            permission: Permission::AllowOnce,
+                                        },
+                                    ).await;
+                                }
                             }
                         }
                         _ => {} // Text 등 다른 타입은 무시
