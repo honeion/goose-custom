@@ -423,13 +423,22 @@ impl<'a> TuiApp<'a> {
                     }
                     table_buffer.clear();
                 }
-                // 일반 텍스트: 마크다운 렌더링
-                let wrapped = textwrap_simple(line, content_width);
-                for wrapped_line in wrapped {
-                    let md_spans = parse_line(&wrapped_line, &md_styles);
-                    let mut line_spans = vec![Span::raw("   ")];
-                    line_spans.extend(md_spans);
-                    lines.push(Line::from(line_spans));
+                // 도구 사용 표시 (▶ 로 시작) → 회색
+                if line.trim_start().starts_with("▶") {
+                    let dimmed = ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray);
+                    lines.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled(line.to_string(), dimmed),
+                    ]));
+                } else {
+                    // 일반 텍스트: 마크다운 렌더링
+                    let wrapped = textwrap_simple(line, content_width);
+                    for wrapped_line in wrapped {
+                        let md_spans = parse_line(&wrapped_line, &md_styles);
+                        let mut line_spans = vec![Span::raw("   ")];
+                        line_spans.extend(md_spans);
+                        lines.push(Line::from(line_spans));
+                    }
                 }
             }
         }
