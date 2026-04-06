@@ -313,6 +313,7 @@ pub struct TuiApp<'a> {
     pub pii_masking_enabled: bool, // PII 마스킹 활성화 상태
     pub pii_masked_count: usize, // 현재 세션에서 마스킹된 항목 수
     pub plan_mode: bool, // Plan 모드 활성화 상태
+    pub safe_mode: bool, // Safe 모드 — 위험 도구 승인 요청
 
     // 애니메이션
     pub spinner: SpinnerFrames,
@@ -382,6 +383,7 @@ impl<'a> TuiApp<'a> {
             pii_masking_enabled: false, // tui_session에서 설정
             pii_masked_count: 0,
             plan_mode: false,
+            safe_mode: false,
 
             spinner: SpinnerFrames::new(),
             last_tick: Instant::now(),

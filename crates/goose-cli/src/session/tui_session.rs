@@ -794,12 +794,23 @@ async fn process_agent_message(
                             // (세션 메모리 기록은 ToolRequest에서 처리)
                         }
                         MessageContent::ActionRequired(action) => {
-                            // 도구 승인 요청 처리 (TUI에서는 자동 승인)
                             if let ActionRequiredData::ToolConfirmation { id, tool_name, .. } = &action.data {
-                                tracing::info!("TUI: 도구 승인 요청 - {} (자동 승인)", tool_name);
-                                app.push_tool_text(&format!("🔓 {} 승인됨", tool_name));
+                                // Safe 모드: 위험 도구는 사용자에게 알림 (자동 승인은 유지하지만 표시)
+                                let dangerous = ["shell", "write", "text_editor", "notebook_edit"];
+                                let is_dangerous = dangerous.iter().any(|d| tool_name.to_lowercase().contains(d));
 
-                                // 자동 승인 전송
+                                if app.safe_mode && is_dangerous {
+                                    app.push_tool_text(&format!("⚠️ {} 실행 (Safe 모드)", tool_name));
+                                    if let Some(last_msg) = app.messages.last_mut() {
+                                        if last_msg.is_streaming {
+                                            last_msg.content.push_str(&format!("  ⚠️ `{}` 실행됨 (Safe 모드)\n", tool_name));
+                                        }
+                                    }
+                                } else {
+                                    app.push_tool_text(&format!("🔓 {} 승인됨", tool_name));
+                                }
+
+                                // 자동 승인 전송 (Safe 모드에서도 승인은 함 — 표시만 다름)
                                 session.agent.handle_confirmation(
                                     id.clone(),
                                     PermissionConfirmation {
@@ -927,6 +938,14 @@ fn handle_slash_command(cmd: &str, app: &mut TuiApp) {
         "/clear" => {
             app.messages.clear();
             app.add_system_message("대화 기록이 삭제되었습니다.".to_string());
+        }
+        "/safe" => {
+            app.safe_mode = !app.safe_mode;
+            if app.safe_mode {
+                app.add_system_message("🛡️ Safe 모드 활성화 — 위험 도구(shell/write) 실행 시 표시됩니다.".to_string());
+            } else {
+                app.add_system_message("🛡️ Safe 모드 비활성화".to_string());
+            }
         }
         "/quit" | "/exit" | "/q" => {
             app.should_quit = true;

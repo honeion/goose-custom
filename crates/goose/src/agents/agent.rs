@@ -1338,9 +1338,19 @@ impl Agent {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("Session {} has no conversation", session_config.id))?;
 
-        // Snip: 오래된 도구 결과 제거 (compaction 전 토큰 절약)
+        // 단계별 Snip: 토큰 사용률에 따라 공격적으로 정리
         let mut conversation = conversation;
-        crate::context_mgmt::snip_old_tool_results(&mut conversation, 10);
+        let context_limit = self.provider().await?.get_model_config().context_limit();
+        let estimated_tokens = session.total_tokens.unwrap_or(0) as usize;
+        let usage_ratio = if context_limit > 0 { estimated_tokens as f64 / context_limit as f64 } else { 0.0 };
+
+        if usage_ratio > 0.6 {
+            // 60%+ → 5턴 이전 도구 결과 제거 (공격적 Snip)
+            crate::context_mgmt::snip_old_tool_results(&mut conversation, 5);
+        } else {
+            // 기본: 10턴 이전 도구 결과 제거
+            crate::context_mgmt::snip_old_tool_results(&mut conversation, 10);
+        }
 
         let needs_auto_compact = check_if_compaction_needed(
             self.provider().await?.as_ref(),
