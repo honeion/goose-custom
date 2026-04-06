@@ -494,21 +494,21 @@ fn display_width(s: &str) -> usize {
     }).sum()
 }
 
-/// 문자열을 target_width 칸에 맞춰 패딩 또는 truncate
+/// 문자열을 target_width 칸에 맞춰 패딩 또는 truncate (잘려도 깔끔하게)
 fn pad_to_width(s: &str, target_width: usize) -> String {
     let current = display_width(s);
     if current > target_width {
-        // 잘라내기 — 표시 너비 기준
+        // 표시 너비 기준으로 자르기
         let mut result = String::new();
         let mut width = 0;
         for c in s.chars() {
             let cw = if c.is_ascii() { 1 } else if ('\u{AC00}'..='\u{D7AF}').contains(&c) || ('\u{2E80}'..='\u{A4CF}').contains(&c) { 2 } else { 1 };
-            if width + cw > target_width.saturating_sub(1) { break; }
+            if width + cw > target_width { break; }
             result.push(c);
             width += cw;
         }
-        result.push('…');
-        let remaining = target_width.saturating_sub(width + 1);
+        // 남은 공간 패딩
+        let remaining = target_width.saturating_sub(width);
         result.push_str(&" ".repeat(remaining));
         result
     } else {

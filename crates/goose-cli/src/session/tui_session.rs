@@ -616,6 +616,20 @@ async fn process_agent_message(
                             app.push_tool_text(&format!("▶ {}", tool_desc));
                             let tool_name = tool_desc.split('(').next().unwrap_or("tool").to_string();
 
+                            // Assistant 스트리밍 영역에 도구 사용 표시 (Claude Code 스타일)
+                            let short_desc = tool_desc.split("path:")
+                                .nth(1)
+                                .and_then(|s| s.split(',').next().or_else(|| s.split(')').next()))
+                                .map(|s| s.trim().trim_matches('"').trim_matches('\'').trim().to_string())
+                                .unwrap_or_else(|| {
+                                    tool_desc.chars().take(80).collect::<String>()
+                                });
+                            if let Some(last_msg) = app.messages.last_mut() {
+                                if last_msg.is_streaming {
+                                    last_msg.content.push_str(&format!("\n> 🔧 `{}` {}\n", tool_name, short_desc));
+                                }
+                            }
+
                             // delegate(서브에이전트) 호출 시 대화창에 진행 상태 표시
                             if tool_name == "delegate" {
                                 let source = tool_desc
@@ -631,7 +645,7 @@ async fn process_agent_message(
                                 }
                             }
 
-                            // 세션 메모리: write/edit/shell 도구 호출 기록
+                            // 세션 메모리: write/edit/shell 도구 호출 기록 (파일 경로만)
                             let write_tools = ["write", "edit", "text_editor", "shell", "notebook_edit"];
                             if write_tools.iter().any(|t| tool_name.to_lowercase().contains(t)) {
                                 let memory_path = std::path::Path::new(".goose/sessions/modified_files.md");
@@ -639,8 +653,14 @@ async fn process_agent_message(
                                     let _ = std::fs::create_dir_all(parent);
                                 }
                                 let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M");
-                                let desc: String = tool_desc.chars().take(200).collect();
-                                let entry = format!("- [{}] {}\n", timestamp, desc);
+                                // 파일 경로만 추출 (path: "..." 패턴)
+                                let file_path_info = tool_desc
+                                    .split("path:")
+                                    .nth(1)
+                                    .and_then(|s| s.split(',').next().or_else(|| s.split(')').next()))
+                                    .map(|s| s.trim().trim_matches('"').trim_matches('\'').trim())
+                                    .unwrap_or(&tool_name);
+                                let entry = format!("- [{}] {} → {}\n", timestamp, tool_name, file_path_info);
                                 let _ = std::fs::OpenOptions::new()
                                     .create(true).append(true)
                                     .open(memory_path)
