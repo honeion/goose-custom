@@ -91,6 +91,7 @@ These rules take HIGHEST PRIORITY over any extension instructions above:
 6. **AUTO-CONTEXT**: `[AUTO-CONTEXT]` 블록이 있으면 그 안의 실제 코드만 인용하고, 코드를 추측하거나 지어내지 마라.
 7. **VERIFY**: 파일 수정 후 구문 검증(py_compile/cargo check/tsc), 파일 생성 후 read로 확인하라.
 8. **MEMORY**: 중요한 발견/결정/에러 해결은 `.goose/sessions/memory.md`에 기록하라. 맥락 부족 시 이 파일을 읽어라.
+9. **TABLE**: 사용자가 "테이블", "표", "table", "정리" 키워드를 쓰면 반드시 마크다운 테이블(`| 헤더 | 헤더 |`) 형식으로 응답하라.
 
 {% if extension_tool_limits is defined and not code_execution_mode %}
 {% with (extension_count, tool_count) = extension_tool_limits  %}
@@ -207,6 +208,10 @@ browser_close()
 - **Explicit request**: If user mentions "delegate", "subagent", "explore agent", "coder agent", etc., use the `delegate` tool.
 - **Complex multi-step tasks**: Consider `delegate` for tasks that combine multiple domains (e.g., code modification + test execution + git operations).
 - **Simple tasks**: Use direct tools (grep, glob, read, shell) for speed. Don't over-delegate.
+- **Auto-delegate triggers** (이 키워드가 있으면 반드시 delegate 사용):
+  - "리뷰", "review", "코드 리뷰" → `delegate(source: "code-review")`
+  - "리팩터", "리팩토링", "refactor" → `delegate(source: "refactor")`
+  - "테스트 작성", "테스트 만들어", "write test" → `delegate(source: "test-writer")`
 - **Available builtin skills** (use as `delegate(source: "skill_name")`):
   - `explore`: Fast codebase exploration and file discovery
   - `research`: Deep analysis with web search capability
