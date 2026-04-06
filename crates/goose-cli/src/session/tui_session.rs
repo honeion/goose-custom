@@ -410,16 +410,18 @@ async fn run_tui_loop(
                                     if let Ok(sessions) = sm.list_sessions().await {
                                         let mut lines = vec!["📋 세션 목록 (최근 10개):".to_string(), "".to_string()];
                                         for (i, s) in sessions.iter().take(10).enumerate() {
-                                            let current = if s.id == session.session_id { " ◀ 현재" } else { "" };
-                                            let name = if s.name.is_empty() { &s.id[..8] } else { &s.name };
-                                            let msgs = s.message_count;
+                                            let current = if s.id == session.session_id { " ◀" } else { "" };
                                             let time = s.updated_at.format("%m-%d %H:%M");
-                                            let dir = s.working_dir.file_name()
-                                                .and_then(|n| n.to_str()).unwrap_or("?");
-                                            lines.push(format!("{}. {} ({} msgs, {}) [{}]{}", i+1, name, msgs, time, dir, current));
+                                            let dir = s.working_dir.to_string_lossy();
+                                            // 디렉토리 경로에서 마지막 2단계만
+                                            let short_dir: String = {
+                                                let parts: Vec<&str> = dir.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+                                                if parts.len() > 2 { parts[parts.len()-2..].join("/") } else { dir.to_string() }
+                                            };
+                                            lines.push(format!("  {}. [{}] {} msgs │ {} │ {}{}", i+1, time, s.message_count, short_dir, s.name, current));
                                         }
                                         lines.push("".to_string());
-                                        lines.push("/resume <번호|ID> 로 세션 전환".to_string());
+                                        lines.push("/resume <번호> 로 세션 전환".to_string());
                                         app.add_system_message(lines.join("\n"));
                                     } else {
                                         app.add_system_message("❌ 세션 목록을 불러올 수 없습니다.".to_string());
@@ -758,9 +760,24 @@ async fn process_agent_message(
                                 }
                             }
 
-                            // 세션 메모리: write/edit/shell 도구 호출 기록
+                            // 세션 메모리 + Safe 모드: write/edit/shell 도구 감지
                             let write_tools = ["write", "edit", "text_editor", "shell", "notebook_edit"];
-                            if write_tools.iter().any(|t| tool_name.to_lowercase().contains(t)) {
+                            let is_write_tool = write_tools.iter().any(|t| tool_name.to_lowercase().contains(t));
+                            if is_write_tool {
+                                // Safe 모드: 위험 도구 실행 표시
+                                if app.safe_mode {
+                                    if let Some(last_msg) = app.messages.last_mut() {
+                                        if last_msg.is_streaming {
+                                            let short_tool = tool_name.split("__").last().unwrap_or(&tool_name);
+                                            let target = if tool_path.is_empty() { "" } else {
+                                                std::path::Path::new(&tool_path)
+                                                    .file_name().and_then(|n| n.to_str()).unwrap_or(&tool_path)
+                                            };
+                                            last_msg.content.push_str(&format!("  ⚠️ {} {}\n", short_tool, target));
+                                        }
+                                    }
+                                }
+                                // 세션 메모리 기록
                                 let memory_path = std::path::Path::new(".goose/sessions/modified_files.md");
                                 if let Some(parent) = memory_path.parent() {
                                     let _ = std::fs::create_dir_all(parent);
