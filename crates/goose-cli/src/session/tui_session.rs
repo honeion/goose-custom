@@ -295,6 +295,8 @@ async fn run_tui_loop(
 
     // Plan 모드 상태
     let mut plan_mode_previous_filter: Option<Option<Vec<String>>> = None; // Some = Plan 모드 중
+    // Safe 모드 상태 (shell 차단)
+    let mut safe_mode_previous_filter: Option<Option<Vec<String>>> = None; // Some = Safe 모드 중
 
     // 세션 메모리 파일 확인 (알림만, 시스템 컨텍스트 주입 안 함)
     let memory_dir = std::path::Path::new(".goose/sessions");
@@ -396,6 +398,26 @@ async fn run_tui_loop(
                                         plan_mode_previous_filter = Some(prev);
                                         app.plan_mode = true;
                                         app.add_system_message("📋 Plan 모드 진입 — 읽기 전용 (read/glob/grep만 가능)\n탐색 후 계획을 세우세요. /plan으로 종료합니다.".to_string());
+                                    }
+                                    terminal.draw(|frame| app.render(frame))?;
+                                    continue;
+                                }
+
+                                // /safe — Safe 모드 (shell/bash 차단)
+                                if content.trim() == "/safe" {
+                                    if let Some(msg) = app.messages.last() {
+                                        if msg.role == super::tui::MessageRole::User { app.messages.pop(); }
+                                    }
+                                    if safe_mode_previous_filter.is_some() {
+                                        let prev = safe_mode_previous_filter.take().unwrap();
+                                        session.agent.exit_safe_mode(prev).await;
+                                        app.safe_mode = false;
+                                        app.add_system_message("🛡️ Safe 모드 종료 — shell 제한 해제".to_string());
+                                    } else {
+                                        let prev = session.agent.enter_safe_mode(&session.session_id).await;
+                                        safe_mode_previous_filter = Some(prev);
+                                        app.safe_mode = true;
+                                        app.add_system_message("🛡️ Safe 모드 활성화 — shell/bash 차단됨\n파일 수정(write/edit)은 가능. 명령 실행 필요 시 /safe 해제.".to_string());
                                     }
                                     terminal.draw(|frame| app.render(frame))?;
                                     continue;
@@ -812,77 +834,14 @@ async fn process_agent_message(
                         }
                         MessageContent::ActionRequired(action) => {
                             if let ActionRequiredData::ToolConfirmation { id, tool_name, .. } = &action.data {
-                                let dangerous = ["shell", "write", "text_editor", "notebook_edit"];
-                                let is_dangerous = dangerous.iter().any(|d| tool_name.to_lowercase().contains(d));
-
-                                if app.safe_mode && is_dangerous {
-                                    // Safe 모드: 위험 도구 → 사용자 확인 대기
-                                    app.push_tool_text(&format!("⚠️ {} — 승인 대기 (Y/N)", tool_name));
-                                    if let Some(last_msg) = app.messages.last_mut() {
-                                        if last_msg.is_streaming {
-                                            last_msg.content.push_str(&format!("\n  ⚠️ `{}` 실행하시겠습니까? (Y: 허용 / N: 거부)\n", tool_name));
-                                        }
-                                    }
-                                    terminal.draw(|frame| app.render(frame))?;
-
-                                    // 키 입력 대기
-                                    let approved = loop {
-                                        if event::poll(Duration::from_millis(100))? {
-                                            if let crossterm::event::Event::Key(key) = event::read()? {
-                                                match key.code {
-                                                    crossterm::event::KeyCode::Char('y') | crossterm::event::KeyCode::Char('Y')
-                                                    | crossterm::event::KeyCode::Enter => break true,
-                                                    crossterm::event::KeyCode::Char('n') | crossterm::event::KeyCode::Char('N')
-                                                    | crossterm::event::KeyCode::Esc => break false,
-                                                    _ => {} // 다른 키 무시
-                                                }
-                                            }
-                                        }
-                                        // 틱 업데이트 (스피너 등)
-                                        app.update(Action::Tick);
-                                        terminal.draw(|frame| app.render(frame))?;
-                                    };
-
-                                    if approved {
-                                        app.push_tool_text(&format!("✅ {} 승인됨", tool_name));
-                                        if let Some(last_msg) = app.messages.last_mut() {
-                                            if last_msg.is_streaming {
-                                                last_msg.content.push_str("  ✅ 승인됨\n");
-                                            }
-                                        }
-                                        session.agent.handle_confirmation(
-                                            id.clone(),
-                                            PermissionConfirmation {
-                                                principal_type: PrincipalType::Tool,
-                                                permission: Permission::AllowOnce,
-                                            },
-                                        ).await;
-                                    } else {
-                                        app.push_tool_text(&format!("❌ {} 거부됨", tool_name));
-                                        if let Some(last_msg) = app.messages.last_mut() {
-                                            if last_msg.is_streaming {
-                                                last_msg.content.push_str("  ❌ 거부됨\n");
-                                            }
-                                        }
-                                        session.agent.handle_confirmation(
-                                            id.clone(),
-                                            PermissionConfirmation {
-                                                principal_type: PrincipalType::Tool,
-                                                permission: Permission::DenyOnce,
-                                            },
-                                        ).await;
-                                    }
-                                } else {
-                                    // 일반 모드: 자동 승인
-                                    app.push_tool_text(&format!("🔓 {} 승인됨", tool_name));
-                                    session.agent.handle_confirmation(
-                                        id.clone(),
-                                        PermissionConfirmation {
-                                            principal_type: PrincipalType::Tool,
-                                            permission: Permission::AllowOnce,
-                                        },
-                                    ).await;
-                                }
+                                app.push_tool_text(&format!("🔓 {} 승인됨", tool_name));
+                                session.agent.handle_confirmation(
+                                    id.clone(),
+                                    PermissionConfirmation {
+                                        principal_type: PrincipalType::Tool,
+                                        permission: Permission::AllowOnce,
+                                    },
+                                ).await;
                             }
                         }
                         _ => {} // Text 등 다른 타입은 무시
@@ -1004,14 +963,7 @@ fn handle_slash_command(cmd: &str, app: &mut TuiApp) {
             app.messages.clear();
             app.add_system_message("대화 기록이 삭제되었습니다.".to_string());
         }
-        "/safe" => {
-            app.safe_mode = !app.safe_mode;
-            if app.safe_mode {
-                app.add_system_message("🛡️ Safe 모드 활성화 — 위험 도구(shell/write) 실행 시 표시됩니다.".to_string());
-            } else {
-                app.add_system_message("🛡️ Safe 모드 비활성화".to_string());
-            }
-        }
+        // /safe는 이벤트 루프에서 처리 (agent 접근 필요)
         "/quit" | "/exit" | "/q" => {
             app.should_quit = true;
         }
