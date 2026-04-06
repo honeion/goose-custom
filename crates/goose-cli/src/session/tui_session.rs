@@ -812,29 +812,77 @@ async fn process_agent_message(
                         }
                         MessageContent::ActionRequired(action) => {
                             if let ActionRequiredData::ToolConfirmation { id, tool_name, .. } = &action.data {
-                                // Safe 모드: 위험 도구는 사용자에게 알림 (자동 승인은 유지하지만 표시)
                                 let dangerous = ["shell", "write", "text_editor", "notebook_edit"];
                                 let is_dangerous = dangerous.iter().any(|d| tool_name.to_lowercase().contains(d));
 
                                 if app.safe_mode && is_dangerous {
-                                    app.push_tool_text(&format!("⚠️ {} 실행 (Safe 모드)", tool_name));
+                                    // Safe 모드: 위험 도구 → 사용자 확인 대기
+                                    app.push_tool_text(&format!("⚠️ {} — 승인 대기 (Y/N)", tool_name));
                                     if let Some(last_msg) = app.messages.last_mut() {
                                         if last_msg.is_streaming {
-                                            last_msg.content.push_str(&format!("  ⚠️ `{}` 실행됨 (Safe 모드)\n", tool_name));
+                                            last_msg.content.push_str(&format!("\n  ⚠️ `{}` 실행하시겠습니까? (Y: 허용 / N: 거부)\n", tool_name));
                                         }
                                     }
-                                } else {
-                                    app.push_tool_text(&format!("🔓 {} 승인됨", tool_name));
-                                }
+                                    terminal.draw(|frame| app.render(frame))?;
 
-                                // 자동 승인 전송 (Safe 모드에서도 승인은 함 — 표시만 다름)
-                                session.agent.handle_confirmation(
-                                    id.clone(),
-                                    PermissionConfirmation {
-                                        principal_type: PrincipalType::Tool,
-                                        permission: Permission::AllowOnce,
-                                    },
-                                ).await;
+                                    // 키 입력 대기
+                                    let approved = loop {
+                                        if event::poll(Duration::from_millis(100))? {
+                                            if let crossterm::event::Event::Key(key) = event::read()? {
+                                                match key.code {
+                                                    crossterm::event::KeyCode::Char('y') | crossterm::event::KeyCode::Char('Y')
+                                                    | crossterm::event::KeyCode::Enter => break true,
+                                                    crossterm::event::KeyCode::Char('n') | crossterm::event::KeyCode::Char('N')
+                                                    | crossterm::event::KeyCode::Esc => break false,
+                                                    _ => {} // 다른 키 무시
+                                                }
+                                            }
+                                        }
+                                        // 틱 업데이트 (스피너 등)
+                                        app.update(Action::Tick);
+                                        terminal.draw(|frame| app.render(frame))?;
+                                    };
+
+                                    if approved {
+                                        app.push_tool_text(&format!("✅ {} 승인됨", tool_name));
+                                        if let Some(last_msg) = app.messages.last_mut() {
+                                            if last_msg.is_streaming {
+                                                last_msg.content.push_str("  ✅ 승인됨\n");
+                                            }
+                                        }
+                                        session.agent.handle_confirmation(
+                                            id.clone(),
+                                            PermissionConfirmation {
+                                                principal_type: PrincipalType::Tool,
+                                                permission: Permission::AllowOnce,
+                                            },
+                                        ).await;
+                                    } else {
+                                        app.push_tool_text(&format!("❌ {} 거부됨", tool_name));
+                                        if let Some(last_msg) = app.messages.last_mut() {
+                                            if last_msg.is_streaming {
+                                                last_msg.content.push_str("  ❌ 거부됨\n");
+                                            }
+                                        }
+                                        session.agent.handle_confirmation(
+                                            id.clone(),
+                                            PermissionConfirmation {
+                                                principal_type: PrincipalType::Tool,
+                                                permission: Permission::DenyOnce,
+                                            },
+                                        ).await;
+                                    }
+                                } else {
+                                    // 일반 모드: 자동 승인
+                                    app.push_tool_text(&format!("🔓 {} 승인됨", tool_name));
+                                    session.agent.handle_confirmation(
+                                        id.clone(),
+                                        PermissionConfirmation {
+                                            principal_type: PrincipalType::Tool,
+                                            permission: Permission::AllowOnce,
+                                        },
+                                    ).await;
+                                }
                             }
                         }
                         _ => {} // Text 등 다른 타입은 무시
