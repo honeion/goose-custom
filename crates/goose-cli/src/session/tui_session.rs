@@ -639,17 +639,19 @@ async fn process_agent_message(
                             };
                             app.push_tool_text(&format!("▶ {}", tool_summary));
 
-                            // Assistant 스트리밍 영역에 도구 사용 한 줄 표시
+                            // Assistant 스트리밍 영역에 도구 사용 한 줄 표시 (인용 아닌 일반 텍스트)
                             if let Some(last_msg) = app.messages.last_mut() {
                                 if last_msg.is_streaming {
+                                    // 도구 이름에서 extension prefix 제거 (developer__read → read)
+                                    let short_tool = tool_name.split("__").last().unwrap_or(&tool_name);
                                     if tool_path.is_empty() {
-                                        last_msg.content.push_str(&format!("\n> 🔧 `{}`\n", tool_name));
+                                        last_msg.content.push_str(&format!("  ▶ {}\n", short_tool));
                                     } else {
                                         let short_path = std::path::Path::new(&tool_path)
                                             .file_name()
                                             .and_then(|n| n.to_str())
                                             .unwrap_or(&tool_path);
-                                        last_msg.content.push_str(&format!("\n> 🔧 `{}` {}\n", tool_name, short_path));
+                                        last_msg.content.push_str(&format!("  ▶ {} ← {}\n", short_tool, short_path));
                                     }
                                 }
                             }

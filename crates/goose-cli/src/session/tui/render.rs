@@ -342,9 +342,10 @@ impl<'a> TuiApp<'a> {
         let separator = "─".repeat((width as usize).saturating_sub(2));
         lines.push(Line::styled(format!(" {}", separator), self.theme.border));
 
-        // 헤더: 아이콘 + 이름 + 시간
+        // 헤더: 아이콘 + 이름 + 시간 (아이콘 너비 보정)
+        let icon_pad = if icon.chars().any(|c| c as u32 > 0xFFFF) { " " } else { "  " };
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", icon), style.label.clone()),
+            Span::styled(format!(" {}{}", icon, icon_pad), style.label.clone()),
             Span::styled(label, style.label.add_modifier(Modifier::BOLD)),
             Span::styled(format!("  {}", timestamp), style.timestamp),
         ]));
