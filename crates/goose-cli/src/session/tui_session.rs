@@ -612,40 +612,64 @@ async fn process_agent_message(
                 for content in &message.content {
                     match content {
                         MessageContent::ToolRequest(req) => {
-                            let tool_desc = req.to_readable_string();
-                            app.push_tool_text(&format!("▶ {}", tool_desc));
-                            let tool_name = tool_desc.split('(').next().unwrap_or("tool").to_string();
+                            // 도구 이름과 경로를 구조적으로 추출
+                            let (tool_name, tool_path) = match &req.tool_call {
+                                Ok(tc) => {
+                                    let name = tc.name.to_string();
+                                    let path = tc.arguments.as_ref()
+                                        .and_then(|args| args.get("path"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    (name, path)
+                                }
+                                Err(_) => ("unknown".to_string(), "".to_string()),
+                            };
 
-                            // Assistant 스트리밍 영역에 도구 사용 표시 (Claude Code 스타일)
-                            let short_desc = tool_desc.split("path:")
-                                .nth(1)
-                                .and_then(|s| s.split(',').next().or_else(|| s.split(')').next()))
-                                .map(|s| s.trim().trim_matches('"').trim_matches('\'').trim().to_string())
-                                .unwrap_or_else(|| {
-                                    tool_desc.chars().take(80).collect::<String>()
-                                });
+                            // 도구 패널에 상세 표시
+                            let tool_summary = if tool_path.is_empty() {
+                                tool_name.clone()
+                            } else {
+                                // 경로에서 파일명만 추출
+                                let file_name = std::path::Path::new(&tool_path)
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or(&tool_path);
+                                format!("{} → {}", tool_name, file_name)
+                            };
+                            app.push_tool_text(&format!("▶ {}", tool_summary));
+
+                            // Assistant 스트리밍 영역에 도구 사용 한 줄 표시
                             if let Some(last_msg) = app.messages.last_mut() {
                                 if last_msg.is_streaming {
-                                    last_msg.content.push_str(&format!("\n> 🔧 `{}` {}\n", tool_name, short_desc));
-                                }
-                            }
-
-                            // delegate(서브에이전트) 호출 시 대화창에 진행 상태 표시
-                            if tool_name == "delegate" {
-                                let source = tool_desc
-                                    .split("source:")
-                                    .nth(1)
-                                    .and_then(|s| s.split(',').next())
-                                    .map(|s| s.trim().trim_matches('"').trim_matches('\''))
-                                    .unwrap_or("subagent");
-                                if let Some(last_msg) = app.messages.last_mut() {
-                                    if last_msg.is_streaming {
-                                        last_msg.content.push_str(&format!("\n🔄 `{}` 서브에이전트 분석 중...\n", source));
+                                    if tool_path.is_empty() {
+                                        last_msg.content.push_str(&format!("\n> 🔧 `{}`\n", tool_name));
+                                    } else {
+                                        let short_path = std::path::Path::new(&tool_path)
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or(&tool_path);
+                                        last_msg.content.push_str(&format!("\n> 🔧 `{}` {}\n", tool_name, short_path));
                                     }
                                 }
                             }
 
-                            // 세션 메모리: write/edit/shell 도구 호출 기록 (파일 경로만)
+                            // delegate(서브에이전트) 호출 시
+                            if tool_name.contains("delegate") {
+                                if let Ok(tc) = &req.tool_call {
+                                    let source = tc.arguments.as_ref()
+                                        .and_then(|args| args.get("source"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("subagent");
+                                    if let Some(last_msg) = app.messages.last_mut() {
+                                        if last_msg.is_streaming {
+                                            last_msg.content.push_str(&format!("\n🔄 `{}` 서브에이전트 분석 중...\n", source));
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 세션 메모리: write/edit/shell 도구 호출 기록
                             let write_tools = ["write", "edit", "text_editor", "shell", "notebook_edit"];
                             if write_tools.iter().any(|t| tool_name.to_lowercase().contains(t)) {
                                 let memory_path = std::path::Path::new(".goose/sessions/modified_files.md");
@@ -653,14 +677,8 @@ async fn process_agent_message(
                                     let _ = std::fs::create_dir_all(parent);
                                 }
                                 let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M");
-                                // 파일 경로만 추출 (path: "..." 패턴)
-                                let file_path_info = tool_desc
-                                    .split("path:")
-                                    .nth(1)
-                                    .and_then(|s| s.split(',').next().or_else(|| s.split(')').next()))
-                                    .map(|s| s.trim().trim_matches('"').trim_matches('\'').trim())
-                                    .unwrap_or(&tool_name);
-                                let entry = format!("- [{}] {} → {}\n", timestamp, tool_name, file_path_info);
+                                let target = if tool_path.is_empty() { &tool_name } else { &tool_path };
+                                let entry = format!("- [{}] {} → {}\n", timestamp, tool_name, target);
                                 let _ = std::fs::OpenOptions::new()
                                     .create(true).append(true)
                                     .open(memory_path)
