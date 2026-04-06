@@ -401,6 +401,93 @@ async fn run_tui_loop(
                                     continue;
                                 }
 
+                                // /sessions — 세션 목록 표시
+                                if content.trim() == "/sessions" {
+                                    if let Some(msg) = app.messages.last() {
+                                        if msg.role == super::tui::MessageRole::User { app.messages.pop(); }
+                                    }
+                                    let sm = goose::session::SessionManager::instance();
+                                    if let Ok(sessions) = sm.list_sessions().await {
+                                        let mut lines = vec!["📋 세션 목록 (최근 10개):".to_string(), "".to_string()];
+                                        for (i, s) in sessions.iter().take(10).enumerate() {
+                                            let current = if s.id == session.session_id { " ◀ 현재" } else { "" };
+                                            let name = if s.name.is_empty() { &s.id[..8] } else { &s.name };
+                                            let msgs = s.message_count;
+                                            let time = s.updated_at.format("%m-%d %H:%M");
+                                            let dir = s.working_dir.file_name()
+                                                .and_then(|n| n.to_str()).unwrap_or("?");
+                                            lines.push(format!("{}. {} ({} msgs, {}) [{}]{}", i+1, name, msgs, time, dir, current));
+                                        }
+                                        lines.push("".to_string());
+                                        lines.push("/resume <번호|ID> 로 세션 전환".to_string());
+                                        app.add_system_message(lines.join("\n"));
+                                    } else {
+                                        app.add_system_message("❌ 세션 목록을 불러올 수 없습니다.".to_string());
+                                    }
+                                    terminal.draw(|frame| app.render(frame))?;
+                                    continue;
+                                }
+
+                                // /resume — 세션 전환
+                                if content.trim() == "/resume" || content.trim().starts_with("/resume ") {
+                                    if let Some(msg) = app.messages.last() {
+                                        if msg.role == super::tui::MessageRole::User { app.messages.pop(); }
+                                    }
+                                    let sm = goose::session::SessionManager::instance();
+                                    let target_id = if content.trim() == "/resume" {
+                                        // 가장 최근 세션
+                                        sm.list_sessions().await.ok()
+                                            .and_then(|sessions| sessions.into_iter()
+                                                .find(|s| s.id != session.session_id)
+                                                .map(|s| s.id))
+                                    } else {
+                                        let arg = content.trim().strip_prefix("/resume ").unwrap_or("").trim();
+                                        // 번호 또는 ID
+                                        if let Ok(num) = arg.parse::<usize>() {
+                                            sm.list_sessions().await.ok()
+                                                .and_then(|sessions| sessions.get(num.saturating_sub(1)).map(|s| s.id.clone()))
+                                        } else {
+                                            Some(arg.to_string())
+                                        }
+                                    };
+
+                                    if let Some(id) = target_id {
+                                        match sm.get_session(&id, true).await {
+                                            Ok(target_session) => {
+                                                // 세션 전환: 대화 히스토리 로드
+                                                session.session_id = id.clone();
+                                                if let Some(conv) = target_session.conversation {
+                                                    session.messages = conv;
+                                                }
+                                                // TUI 메시지 재구성
+                                                app.messages.clear();
+                                                for msg in session.messages.messages() {
+                                                    match msg.role {
+                                                        rmcp::model::Role::User => {
+                                                            app.messages.push(super::tui::ChatMessage::user(msg.as_concat_text()));
+                                                        }
+                                                        rmcp::model::Role::Assistant => {
+                                                            app.messages.push(super::tui::ChatMessage::assistant(msg.as_concat_text()));
+                                                        }
+                                                    }
+                                                }
+                                                let name = if target_session.name.is_empty() { &id[..8.min(id.len())] } else { &target_session.name };
+                                                app.add_system_message(format!("✅ 세션 전환: {} ({} 메시지)", name, target_session.message_count));
+                                                app.session_id = id;
+                                                // 컨텍스트 상태 초기화
+                                                context_state = ContextState::new();
+                                            }
+                                            Err(e) => {
+                                                app.add_system_message(format!("❌ 세션을 찾을 수 없습니다: {}", e));
+                                            }
+                                        }
+                                    } else {
+                                        app.add_system_message("❌ 전환할 세션이 없습니다. /sessions로 목록을 확인하세요.".to_string());
+                                    }
+                                    terminal.draw(|frame| app.render(frame))?;
+                                    continue;
+                                }
+
                                 handle_slash_command(&content, &mut app);
                                 terminal.draw(|frame| app.render(frame))?;
                                 // /quit, /exit 처리
@@ -858,7 +945,7 @@ fn handle_slash_command(cmd: &str, app: &mut TuiApp) {
             app.config_panel.open();
         }
         _ => {
-            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t(theme) /hints /audit /config /plan", cmd));
+            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t /hints /audit /config /plan /sessions /resume", cmd));
         }
     }
 }
