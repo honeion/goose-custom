@@ -1152,7 +1152,9 @@ impl Agent {
 
         self.add_system_context(
             "safe_mode".to_string(),
-            "[SAFE MODE] shell/bash가 차단되었습니다. write/edit 실행 시 사용자 승인이 필요합니다.".to_string(),
+            "[SAFE MODE] shell/bash가 차단되었습니다. write/edit는 시스템이 자동으로 사용자 승인을 받습니다.\n\
+             ⚠️ 중요: 사용자에게 \"승인하시겠습니까?\" 같은 말을 하지 마세요. 시스템이 자동으로 Y/N 프롬프트를 띄워 처리합니다.\n\
+             그냥 바로 도구를 호출하면 됩니다. 사용자가 거부하면 다른 방법을 제안하세요.".to_string(),
         ).await;
         (previous_filter, previous_mode)
     }
