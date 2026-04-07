@@ -295,8 +295,7 @@ async fn run_tui_loop(
 
     // Plan 모드 상태
     let mut plan_mode_previous_filter: Option<Option<Vec<String>>> = None; // Some = Plan 모드 중
-    // Safe 모드 상태 (shell 차단 + write/edit 승인)
-    let mut safe_mode_state: Option<(Option<Vec<String>>, goose::config::GooseMode)> = None;
+    // (Safe 모드 → YOLO 모드로 전환됨, 상태 변수 불필요)
 
     // 세션 메모리 파일 확인 (알림만, 시스템 컨텍스트 주입 안 함)
     let memory_dir = std::path::Path::new(".goose/sessions");
@@ -403,24 +402,16 @@ async fn run_tui_loop(
                                     continue;
                                 }
 
-                                // /safe — Safe 모드 (shell 차단 + write/edit 승인 요청)
-                                if content.trim() == "/safe" {
+                                // /yolo — YOLO 모드 (자동 승인, 기본은 Y/N 확인)
+                                if content.trim() == "/yolo" {
                                     if let Some(msg) = app.messages.last() {
                                         if msg.role == super::tui::MessageRole::User { app.messages.pop(); }
                                     }
-                                    if let Some((prev_filter, prev_mode)) = safe_mode_state.take() {
-                                        session.agent.exit_safe_mode(prev_filter, prev_mode).await;
-                                        // GooseMode 복원
-                                        session.agent.config.goose_mode = prev_mode;
-                                        app.safe_mode = false;
-                                        app.add_system_message("🛡️ Safe 모드 종료 — shell 해제, 자동 승인 복원".to_string());
+                                    app.yolo_mode = !app.yolo_mode;
+                                    if app.yolo_mode {
+                                        app.add_system_message("🚀 YOLO 모드 활성화 — 모든 도구 자동 승인 (조심하세요)".to_string());
                                     } else {
-                                        let (prev_filter, prev_mode) = session.agent.enter_safe_mode(&session.session_id).await;
-                                        // GooseMode를 Approve로 전환 → write/edit에 ActionRequired 발생
-                                        session.agent.config.goose_mode = goose::config::GooseMode::Approve;
-                                        safe_mode_state = Some((prev_filter, prev_mode));
-                                        app.safe_mode = true;
-                                        app.add_system_message("🛡️ Safe 모드 활성화\n  ├─ shell/bash: 차단\n  └─ write/edit: 실행 전 승인 요청 (Y/N)".to_string());
+                                        app.add_system_message("🛡️ YOLO 모드 종료 — 위험 도구는 Y/N 확인".to_string());
                                     }
                                     terminal.draw(|frame| app.render(frame))?;
                                     continue;
@@ -837,8 +828,18 @@ async fn process_agent_message(
                         }
                         MessageContent::ActionRequired(action) => {
                             if let ActionRequiredData::ToolConfirmation { id, tool_name, .. } = &action.data {
-                                if app.safe_mode {
-                                    // Safe 모드: Y/N 확인
+                                if app.yolo_mode {
+                                    // YOLO 모드: 자동 승인
+                                    app.push_tool_text(&format!("🚀 {} 자동 승인", tool_name));
+                                    session.agent.handle_confirmation(
+                                        id.clone(),
+                                        PermissionConfirmation {
+                                            principal_type: PrincipalType::Tool,
+                                            permission: Permission::AllowOnce,
+                                        },
+                                    ).await;
+                                } else {
+                                    // 기본: Y/N 확인
                                     let short = tool_name.split("__").last().unwrap_or(tool_name);
                                     if let Some(last_msg) = app.messages.last_mut() {
                                         if last_msg.is_streaming {
@@ -880,16 +881,6 @@ async fn process_agent_message(
                                     session.agent.handle_confirmation(
                                         id.clone(),
                                         PermissionConfirmation { principal_type: PrincipalType::Tool, permission },
-                                    ).await;
-                                } else {
-                                    // 일반: 자동 승인
-                                    app.push_tool_text(&format!("🔓 {} 승인", tool_name));
-                                    session.agent.handle_confirmation(
-                                        id.clone(),
-                                        PermissionConfirmation {
-                                            principal_type: PrincipalType::Tool,
-                                            permission: Permission::AllowOnce,
-                                        },
                                     ).await;
                                 }
                             }
@@ -1031,7 +1022,7 @@ fn handle_slash_command(cmd: &str, app: &mut TuiApp) {
             app.config_panel.open();
         }
         _ => {
-            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t /hints /audit /config /plan /sessions /resume", cmd));
+            app.add_system_message(format!("알 수 없는 명령어: {}\n사용 가능: /help /clear /quit /t /hints /audit /config /plan /sessions /resume /yolo", cmd));
         }
     }
 }

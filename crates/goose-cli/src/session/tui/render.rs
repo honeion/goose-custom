@@ -612,8 +612,8 @@ impl<'a> TuiApp<'a> {
             ),
             if self.plan_mode {
                 Span::styled(" 📋Plan", ratatui::style::Style::default().fg(ratatui::style::Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD))
-            } else if self.safe_mode {
-                Span::styled(" 🛡️Safe", ratatui::style::Style::default().fg(ratatui::style::Color::Cyan).add_modifier(ratatui::style::Modifier::BOLD))
+            } else if self.yolo_mode {
+                Span::styled(" 🚀YOLO", ratatui::style::Style::default().fg(ratatui::style::Color::Red).add_modifier(ratatui::style::Modifier::BOLD))
             } else {
                 Span::raw("")
             },

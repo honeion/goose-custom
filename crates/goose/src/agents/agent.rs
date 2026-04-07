@@ -1133,37 +1133,7 @@ impl Agent {
         self.remove_system_context("plan_mode").await;
     }
 
-    /// Safe 모드 진입 — shell 차단 + write/edit 승인 요청 (Approve 모드로 전환)
-    /// 반환: (이전 tool_filter, 이전 goose_mode)
-    pub async fn enter_safe_mode(&self, session_id: &str) -> (Option<Vec<String>>, GooseMode) {
-        let previous_filter = self.tool_filter.lock().await.clone();
-        let previous_mode = self.config.goose_mode;
-
-        // shell/bash 차단
-        let all_tools = self.list_tools(session_id, None).await;
-        let safe_filter: Vec<String> = all_tools.iter()
-            .map(|t| t.name.to_string())
-            .filter(|name| {
-                let lower = name.to_lowercase();
-                !lower.contains("shell") && !lower.contains("bash")
-            })
-            .collect();
-        *self.tool_filter.lock().await = Some(safe_filter);
-
-        self.add_system_context(
-            "safe_mode".to_string(),
-            "[SAFE MODE] shell/bash가 차단되었습니다. write/edit는 시스템이 자동으로 사용자 승인을 받습니다.\n\
-             ⚠️ 중요: 사용자에게 \"승인하시겠습니까?\" 같은 말을 하지 마세요. 시스템이 자동으로 Y/N 프롬프트를 띄워 처리합니다.\n\
-             그냥 바로 도구를 호출하면 됩니다. 사용자가 거부하면 다른 방법을 제안하세요.".to_string(),
-        ).await;
-        (previous_filter, previous_mode)
-    }
-
-    /// Safe 모드 종료
-    pub async fn exit_safe_mode(&self, previous_filter: Option<Vec<String>>, _previous_mode: GooseMode) {
-        *self.tool_filter.lock().await = previous_filter;
-        self.remove_system_context("safe_mode").await;
-    }
+    // (Safe 모드는 permission_inspector에서 dangerous tool 자동 감지로 대체됨)
 
     pub async fn remove_extension(&self, name: &str, session_id: &str) -> Result<()> {
         self.extension_manager.remove_extension(name).await?;

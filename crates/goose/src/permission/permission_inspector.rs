@@ -112,13 +112,27 @@ impl ToolInspector for PermissionInspector {
         let mut results = Vec::new();
         let permission_manager = &self.permission_manager;
 
+        // 위험 도구: Auto 모드에서도 항상 승인 요청 (Claude Code 스타일)
+        let dangerous_tool_patterns = ["shell", "bash", "write", "edit", "text_editor", "notebook_edit", "undo"];
+        let is_dangerous_tool = |name: &str| -> bool {
+            let lower = name.to_lowercase();
+            dangerous_tool_patterns.iter().any(|p| lower.contains(p))
+        };
+
         for request in tool_requests {
             if let Ok(tool_call) = &request.tool_call {
                 let tool_name = &tool_call.name;
 
                 let action = match goose_mode {
                     GooseMode::Chat => continue,
-                    GooseMode::Auto => InspectionAction::Allow,
+                    GooseMode::Auto => {
+                        // Auto 모드에서도 위험 도구는 승인 요청
+                        if is_dangerous_tool(tool_name) {
+                            InspectionAction::RequireApproval(Some("Dangerous tool requires user approval".to_string()))
+                        } else {
+                            InspectionAction::Allow
+                        }
+                    }
                     GooseMode::Approve | GooseMode::SmartApprove => {
                         // 1. Check user-defined permission first
                         if let Some(level) = permission_manager.get_user_permission(tool_name) {
