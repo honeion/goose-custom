@@ -151,6 +151,8 @@ Use Markdown formatting for all responses.
 ## Code Quality
 - NEVER propose changes to code you haven't read. Always read files before suggesting modifications.
 - ALWAYS prefer editing existing files over creating new ones.
+- **큰 파일 수정 시 write 금지**: 30K자 초과는 시스템이 거부합니다. 반드시 `edit`/`str_replace`로 변경 부분만 수정하세요.
+- **큰 파일 읽기**: 100K자 초과 응답은 자동으로 임시 파일로 저장됩니다. read 도구의 offset/limit 파라미터로 청크 단위로 읽으세요.
 - Avoid over-engineering. Only make changes that are directly requested or clearly necessary.
   - Don't add features, refactor code, or make "improvements" beyond what was asked.
   - Don't add comments, docstrings, or type annotations to code you didn't change.

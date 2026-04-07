@@ -729,6 +729,37 @@ impl Agent {
         });
         tracing::Span::current().record("input", tracing::field::display(&input_summary));
 
+        // 출력 fallback: write 도구의 content가 너무 크면 사전 거부 + edit 사용 유도
+        const MAX_WRITE_CONTENT_CHARS: usize = 30_000; // ~7500 토큰
+        let tool_lower = tool_call.name.to_lowercase();
+        if tool_lower.contains("write") || tool_lower.contains("text_editor") {
+            if let Some(args) = &tool_call.arguments {
+                // content 또는 file_text 필드 체크
+                let content_size = args.get("content")
+                    .or_else(|| args.get("file_text"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
+                if content_size > MAX_WRITE_CONTENT_CHARS {
+                    let error_msg = format!(
+                        "❌ Write 거부: content가 {} 자로 너무 큽니다 (한도: {} 자).\n\
+                         대안: 다음 중 하나를 사용하세요:\n\
+                         1) `edit` 도구 + str_replace로 부분 수정 (권장)\n\
+                         2) `text_editor` 도구의 `str_replace` 명령\n\
+                         3) 파일을 여러 번에 나눠서 write (먼저 쓰고, 그 다음 append)\n\
+                         전체 파일 재작성 대신 변경된 부분만 수정하세요.",
+                        content_size, MAX_WRITE_CONTENT_CHARS
+                    );
+                    tracing::warn!("Write 도구 사전 거부: content size = {}", content_size);
+                    return (request_id, Ok(ToolCallResult::from(Err(ErrorData::new(
+                        ErrorCode::INVALID_PARAMS,
+                        error_msg,
+                        None,
+                    )))));
+                }
+            }
+        }
+
         if tool_call.name == PLATFORM_MANAGE_SCHEDULE_TOOL_NAME {
             let arguments = tool_call
                 .arguments
