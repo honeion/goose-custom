@@ -728,7 +728,18 @@ async fn process_agent_message(
                                         .to_string();
                                     (name, path)
                                 }
-                                Err(_) => ("unknown".to_string(), "".to_string()),
+                                Err(e) => {
+                                    // 도구 호출 파싱 실패 — 보통 args가 너무 커서 JSON이 잘림
+                                    if let Some(last_msg) = app.messages.last_mut() {
+                                        if last_msg.is_streaming {
+                                            last_msg.content.push_str(&format!(
+                                                "\n  ⚠️ 도구 호출 파싱 실패: {} (응답이 너무 길어 잘림 — 작업을 더 작게 나눠주세요)\n",
+                                                e
+                                            ));
+                                        }
+                                    }
+                                    ("(파싱 실패)".to_string(), "".to_string())
+                                }
                             };
 
                             // 도구 패널에 상세 표시
