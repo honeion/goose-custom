@@ -50,6 +50,7 @@ pub enum ConfigChange {
     PiiWhitelistUpdated(Vec<String>),
     PiiDisabledTypesUpdated(HashSet<MaskType>),
     MaxTokensChanged(u32),
+    MaxOutputTokensChanged(u32),
     MaxTurnsChanged(u32),
     AuditToggled(bool),
 }
@@ -96,7 +97,8 @@ pub struct ConfigPanel {
     whitelist_input: String,
 
     // === Advanced 탭 값 ===
-    pub max_tokens: u32,
+    pub max_tokens: u32,          // Context Window (입력 한도, 표시용)
+    pub max_output_tokens: u32,   // Max Output Tokens (응답 한도, GOOSE_MAX_TOKENS)
     pub max_turns: u32,
     pub api_version: String,
     pub audit_enabled: bool,
@@ -126,6 +128,7 @@ impl ConfigPanel {
             whitelist_input: String::new(),
 
             max_tokens: 128000,
+            max_output_tokens: 4096,
             max_turns: 1000,
             api_version: String::new(),
             audit_enabled: true,
@@ -161,7 +164,7 @@ impl ConfigPanel {
         match self.active_tab {
             ConfigTab::General => 3,   // provider, model, mode
             ConfigTab::Pii => 6,       // on/off, 4 categories, whitelist
-            ConfigTab::Advanced => 4,  // max_tokens, max_turns, api_version, audit
+            ConfigTab::Advanced => 5,  // context_window, max_output_tokens, max_turns, api_version, audit
         }
     }
 
@@ -241,6 +244,7 @@ impl ConfigPanel {
         self.pending_changes.push(ConfigChange::PiiWhitelistUpdated(self.pii_whitelist.clone()));
         self.pending_changes.push(ConfigChange::PiiDisabledTypesUpdated(self.build_disabled_types()));
         self.pending_changes.push(ConfigChange::MaxTokensChanged(self.max_tokens));
+        self.pending_changes.push(ConfigChange::MaxOutputTokensChanged(self.max_output_tokens));
         self.pending_changes.push(ConfigChange::MaxTurnsChanged(self.max_turns));
         self.pending_changes.push(ConfigChange::AuditToggled(self.audit_enabled));
 
@@ -394,16 +398,18 @@ impl ConfigPanel {
             match key.code {
                 KeyCode::Char('+') | KeyCode::Char('=') => {
                     match self.focused_field {
-                        0 => self.max_tokens = (self.max_tokens + 1000).min(1_000_000),
-                        1 => self.max_turns = (self.max_turns + 10).min(10_000),
+                        0 => {} // Context Window는 provider 결정값, 조정 불가
+                        1 => self.max_output_tokens = (self.max_output_tokens + 1024).min(16384),
+                        2 => self.max_turns = (self.max_turns + 10).min(10_000),
                         _ => {}
                     }
                     return true;
                 }
                 KeyCode::Char('-') | KeyCode::Char('_') => {
                     match self.focused_field {
-                        0 => self.max_tokens = self.max_tokens.saturating_sub(1000).max(1000),
-                        1 => self.max_turns = self.max_turns.saturating_sub(10).max(1),
+                        0 => {} // Context Window는 조정 불가
+                        1 => self.max_output_tokens = self.max_output_tokens.saturating_sub(1024).max(1024),
+                        2 => self.max_turns = self.max_turns.saturating_sub(10).max(1),
                         _ => {}
                     }
                     return true;
@@ -742,23 +748,28 @@ impl ConfigPanel {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Line::from(""));
 
-        // 0: Max Tokens (+/-)
-        let mt_focused = self.focused_field == 0;
-        lines.push(self.render_number_field(mt_focused, "Max Tokens", self.max_tokens, "+/-: 1000 단위"));
+        // 0: Context Window (표시 전용, provider가 결정)
+        let cw_focused = self.focused_field == 0;
+        lines.push(self.render_number_field(cw_focused, "Context Window", self.max_tokens, "provider 결정값"));
         lines.push(Line::from(""));
 
-        // 1: Max Turns (+/-)
-        let turns_focused = self.focused_field == 1;
+        // 1: Max Output Tokens (+/- 조정 가능, GOOSE_MAX_TOKENS)
+        let mot_focused = self.focused_field == 1;
+        lines.push(self.render_number_field(mot_focused, "Max Output Tokens", self.max_output_tokens, "+/-: 1024 단위 (GPT-4o max 16384)"));
+        lines.push(Line::from(""));
+
+        // 2: Max Turns (+/-)
+        let turns_focused = self.focused_field == 2;
         lines.push(self.render_number_field(turns_focused, "Max Turns", self.max_turns, "+/-: 10 단위"));
         lines.push(Line::from(""));
 
-        // 2: API Version (표시만 + env var 힌트)
-        let av_focused = self.focused_field == 2;
+        // 3: API Version (표시만 + env var 힌트)
+        let av_focused = self.focused_field == 3;
         lines.push(self.render_field_line(av_focused, "API Version", &self.api_version, Some("AZURE_OPENAI_API_VERSION")));
         lines.push(Line::from(""));
 
-        // 3: Audit 토글
-        let au_focused = self.focused_field == 3;
+        // 4: Audit 토글
+        let au_focused = self.focused_field == 4;
         let au_prefix = if au_focused { " ▶ " } else { "   " };
         let au_style = if au_focused {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)

@@ -235,6 +235,9 @@ async fn run_tui_loop(
     app.config_panel.pii_enabled = app.pii_masking_enabled;
     app.config_panel.audit_enabled = audit_enabled;
     app.config_panel.max_tokens = app.token_usage.max;
+    app.config_panel.max_output_tokens = Config::global()
+        .get_param::<u32>("GOOSE_MAX_TOKENS")
+        .unwrap_or(4096);
     app.config_panel.max_turns = Config::global()
         .get_param::<u32>("GOOSE_MAX_TURNS")
         .unwrap_or(1000);
@@ -1287,6 +1290,11 @@ async fn apply_config_change(
         }
         ConfigChange::MaxTokensChanged(max) => {
             app.token_usage.max = *max;
+        }
+        ConfigChange::MaxOutputTokensChanged(max) => {
+            app.add_system_message(format!(
+                "📝 Max Output Tokens은 TUI에서 직접 변경 불가 — 환경변수 설정 필요:\n   GOOSE_MAX_TOKENS={}\n   (설정 후 재시작)", max
+            ));
         }
         ConfigChange::MaxTurnsChanged(turns) => {
             session.max_turns = Some(*turns);
